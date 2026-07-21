@@ -1,0 +1,14 @@
+# Machine-local / secret-bearing — never track these
+.gitconfig.local
+*.local
+*.orig
+*.pre-dotfiles.*
+
+# OS cruft
+.DS_Store
+
+# Belt-and-suspenders: common secret files, in case they ever land here
+*.pem
+*.key
+**/credentials
+**/hosts.yml

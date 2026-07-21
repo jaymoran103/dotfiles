@@ -1,0 +1,29 @@
+# Ghostty configuration
+# Docs: https://ghostty.org/docs/config
+# Reload after editing: Cmd+Shift+, (macOS) / Ctrl+Shift+, (Linux)
+
+# --- Appearance ---
+theme = Catppuccin Mocha
+font-family = JetBrainsMono Nerd Font Mono
+font-size = 14
+font-thicken = true
+
+# Roomier text; comfortable window padding
+adjust-cell-height = 10%
+window-padding-x = 10
+window-padding-y = 8
+window-padding-balance = true
+
+# --- Cursor ---
+cursor-style = block
+cursor-style-blink = false
+shell-integration-features = cursor,sudo,title
+
+# --- Scrollback & behavior ---
+scrollback-limit = 10000000
+copy-on-select = clipboard
+confirm-close-surface = false
+
+# --- Window (macos-* keys are ignored on Linux) ---
+macos-titlebar-style = tabs
+window-save-state = always

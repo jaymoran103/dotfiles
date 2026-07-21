@@ -1,0 +1,20 @@
+[user]
+	name = Jay Moran
+	email = jaymorandev@gmail.com
+[init]
+	defaultBranch = main
+
+# Machine-specific / work settings (corp CA certs, internal remotes, tokens)
+# live here and are NOT tracked. install.sh creates an empty one if missing.
+[include]
+	path = ~/.gitconfig.local
+# gh credential helper — portable: relies on `gh` being on PATH (not an
+# absolute Homebrew path, so it works on Linux too). NOTE: re-running
+# `gh auth setup-git` will rewrite these with an absolute path; restore
+# this form afterward.
+[credential "https://github.com"]
+	helper =
+	helper = !gh auth git-credential
+[credential "https://gist.github.com"]
+	helper =
+	helper = !gh auth git-credential

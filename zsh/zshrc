@@ -1,0 +1,82 @@
+# ======================================================================
+# Portable zsh config — macOS + Linux.
+# Machine-specific tools/paths are guarded so a missing file skips
+# cleanly instead of erroring. Managed/symlinked from ~/dotfiles.
+# ======================================================================
+
+# --- ghost-complete: init (macOS-only; guarded so Linux skips silently) --
+# >>> ghost-complete initialize >>>
+# !! Portable variant of the block 'ghost-complete install' manages.
+#    Re-running that installer may overwrite this with absolute paths;
+#    re-run ~/dotfiles/install.sh link to restore the portable version. !!
+if [[ -r "$HOME/.config/ghost-complete/shell/init.zsh" ]]; then
+  builtin source "$HOME/.config/ghost-complete/shell/init.zsh"
+fi
+# <<< ghost-complete initialize <<<
+
+# --- History ------------------------------------------------------------
+HISTFILE="$HOME/.zsh_history"
+HISTSIZE=50000
+SAVEHIST=50000
+setopt SHARE_HISTORY          # share history across concurrent sessions
+setopt HIST_IGNORE_ALL_DUPS   # drop older duplicate of a repeated command
+setopt HIST_IGNORE_SPACE      # don't record commands prefixed with a space
+setopt HIST_REDUCE_BLANKS     # trim superfluous whitespace before saving
+setopt HIST_VERIFY            # expand history references before running
+
+# --- PATH ---------------------------------------------------------------
+# pnpm home differs by OS
+case "$(uname -s)" in
+  Darwin) export PNPM_HOME="$HOME/Library/pnpm" ;;
+  *)      export PNPM_HOME="$HOME/.local/share/pnpm" ;;
+esac
+case ":$PATH:" in *":$PNPM_HOME:"*) ;; *) export PATH="$PNPM_HOME:$PATH" ;; esac
+
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+
+# --- nvm (lazy-loaded) --------------------------------------------------
+# Eager nvm.sh sourcing costs ~250ms/shell. Stubs load it on first use.
+export NVM_DIR="$HOME/.nvm"
+_load_nvm() {
+  unset -f nvm node npm npx corepack 2>/dev/null
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+}
+for _cmd in nvm node npm npx corepack; do
+  eval "${_cmd}() { _load_nvm; ${_cmd} \"\$@\"; }"
+done
+unset _cmd
+
+# --- Completion ---------------------------------------------------------
+# Rebuild the compdump at most once a day; else load cached (-C skips audit).
+autoload -Uz compinit
+if [[ -n ${ZDOTDIR:-$HOME}/.zcompdump(#qN.mh+24) ]]; then
+  compinit
+else
+  compinit -C
+fi
+
+# --- ghost-complete: shell integration (macOS-only; guarded) ------------
+# >>> ghost-complete shell integration >>>
+# !! Portable variant — see note in the initialize block above. !!
+[[ -r "$HOME/.config/ghost-complete/shell/ghost-complete.zsh" ]] \
+  && source "$HOME/.config/ghost-complete/shell/ghost-complete.zsh"
+# <<< ghost-complete shell integration <<<
+
+# --- Plugins ------------------------------------------------------------
+# zsh-autosuggestions: try known prefixes (Homebrew macOS/Linux, apt, Arch).
+# Hardcoded candidates rather than `brew --prefix` to keep startup fast.
+for _p in \
+  /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+  /home/linuxbrew/.linuxbrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+  /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+  /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh; do
+  [[ -r "$_p" ]] && source "$_p" && break
+done
+unset _p
+
+# --- Prompt -------------------------------------------------------------
+command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"
+
+# --- Environment --------------------------------------------------------
+export EDITOR="code --wait"
