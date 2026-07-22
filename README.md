@@ -8,14 +8,14 @@ Portable zsh + Ghostty + starship setup for macOS and Linux.
 |------|--------------|---------|
 | `zsh/zshrc` | `~/.zshrc` | Interactive shell: history, lazy nvm, completion cache, plugins, prompt |
 | `zsh/zprofile` | `~/.zprofile` | Homebrew env (macOS or Linuxbrew) |
-| `config/ghostty/config` | `~/.config/ghostty/config` | Terminal: Catppuccin Mocha, JetBrainsMono Nerd Font |
+| `config/ghostty/config` | `~/.config/ghostty/config` | Terminal: Catppuccin Mocha, bundled JetBrains Mono (no Nerd Font) |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
 
 ## Install
 
 ```sh
-git clone git@github.com:jaymoran103/dotfiles.git ~/dotfiles
+git clone https://github.com/jaymoran103/dotfiles.git ~/dotfiles
 cd ~/dotfiles
 ./install.sh          # installs deps + symlinks configs
 exec zsh
@@ -23,6 +23,26 @@ exec zsh
 
 `./install.sh link` symlinks only; `./install.sh deps` installs tools only.
 Existing real files are backed up to `*.pre-dotfiles.<timestamp>` before linking.
+
+### New Linux machine — full sequence
+
+Validated on Ubuntu 24.04. Run in order:
+
+```sh
+cat /etc/os-release                       # 1. confirm the distro (see caveat below)
+git clone https://github.com/jaymoran103/dotfiles.git ~/dotfiles
+cd ~/dotfiles && ./install.sh             # 2. deps + symlinks
+chsh -s "$(command -v zsh)"               # 3. make zsh the login shell (log out/in)
+exec zsh                                  # 4. start using it now
+nvm install --lts                         # 5. install a Node version (lazy-load works, but none ships)
+corepack enable                           # 6. enable pnpm
+```
+
+**Distro caveat:** `install.sh`'s package step is tested on **apt** (Debian/Ubuntu).
+It also has a `pacman` (Arch) branch that's untested, and **no `dnf` (Fedora/RHEL)
+branch** — on those, install the two packages by hand:
+`zsh zsh-autosuggestions`, then re-run `./install.sh link`. Everything else
+(starship, nvm, symlinks, the shell config) is distro-independent and works as-is.
 
 ## Dependencies (installed by `install.sh`)
 
