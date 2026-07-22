@@ -27,7 +27,6 @@ install_deps() {
   if [[ "$OS" == "Darwin" ]]; then
     command -v brew >/dev/null || { info "Install Homebrew first: https://brew.sh"; return; }
     brew install starship zsh-autosuggestions nvm || true
-    brew install --cask font-jetbrains-mono-nerd-font || true
     brew install stanmarek/tap/ghost-complete || true   # macOS-only autocomplete
     command -v ghost-complete >/dev/null && ghost-complete install || true
   elif [[ "$OS" == "Linux" ]]; then
@@ -40,9 +39,8 @@ install_deps() {
     command -v starship >/dev/null || sh -c "$(curl -fsSL https://starship.rs/install.sh)" -- -y
     [[ -d "$HOME/.nvm" ]] || \
       sh -c "$(curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh)"
-    info "NOTE: on Linux, a JetBrainsMono *Nerd Font* (with glyphs) may need a manual"
-    info "      install — see https://www.nerdfonts.com/font-downloads. ghost-complete"
-    info "      is macOS-only and is skipped here (the config degrades gracefully)."
+    info "NOTE: ghost-complete is macOS-only and is skipped on Linux (the shell"
+    info "      config degrades gracefully when it's absent). No special font needed."
   fi
 }
 

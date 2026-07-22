@@ -79,4 +79,14 @@ unset _p
 command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"
 
 # --- Environment --------------------------------------------------------
-export EDITOR="code --wait"
+# Prefer VS Code if present (macOS + Linux); else fall back to a TTY editor so
+# a fresh box without `code` still has a working $EDITOR.
+if command -v code >/dev/null 2>&1; then
+  export EDITOR="code --wait"
+elif command -v nvim >/dev/null 2>&1; then
+  export EDITOR="nvim"
+elif command -v vim >/dev/null 2>&1; then
+  export EDITOR="vim"
+else
+  export EDITOR="nano"
+fi

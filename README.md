@@ -29,14 +29,16 @@ Existing real files are backed up to `*.pre-dotfiles.<timestamp>` before linking
 - **starship** — prompt
 - **zsh-autosuggestions** — inline history suggestions
 - **nvm** — Node version manager (lazy-loaded)
-- **JetBrainsMono Nerd Font** — glyphs for the prompt
 - **ghost-complete** — *macOS-only* terminal autocomplete (skipped on Linux; the
   shell config degrades gracefully when it's absent)
 
+The prompt uses plain-text symbols only, so **no special/Nerd font is required** —
+it renders the same in any monospace font.
+
 ### Linux notes
-- Nerd Font may need a manual install: <https://www.nerdfonts.com/font-downloads>
 - `zsh-autosuggestions` comes from the distro package (apt/pacman); the shell config
   searches Homebrew, apt, and Arch install paths automatically.
+- If zsh isn't your login shell yet: `chsh -s "$(command -v zsh)"` (log out/in after).
 
 ## Machine-specific settings
 
