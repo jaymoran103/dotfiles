@@ -4,7 +4,9 @@
 
 # --- Appearance ---
 theme = Catppuccin Mocha
-font-family = JetBrainsMono Nerd Font Mono
+# font-family left unset → Ghostty's bundled default (JetBrains Mono).
+# Nerd Font glyphs (e.g. starship's git symbols) still render via Ghostty's
+# built-in symbol fallback, so the prompt is unaffected.
 font-size = 14
 font-thicken = true
 
