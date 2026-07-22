@@ -30,15 +30,20 @@ install_deps() {
     brew install stanmarek/tap/ghost-complete || true   # macOS-only autocomplete
     command -v ghost-complete >/dev/null && ghost-complete install || true
   elif [[ "$OS" == "Linux" ]]; then
+    # Use sudo only when not already root (works on containers/root VMs too).
+    local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
     if command -v apt >/dev/null; then
-      sudo apt update
-      sudo apt install -y zsh zsh-autosuggestions
+      $SUDO apt update
+      $SUDO apt install -y zsh zsh-autosuggestions git curl ca-certificates locales
     elif command -v pacman >/dev/null; then
-      sudo pacman -S --needed --noconfirm zsh zsh-autosuggestions
+      $SUDO pacman -S --needed --noconfirm zsh zsh-autosuggestions git curl
     fi
-    command -v starship >/dev/null || sh -c "$(curl -fsSL https://starship.rs/install.sh)" -- -y
+    # Best-effort (|| true): a network/install hiccup must not abort linking.
+    command -v starship >/dev/null || \
+      sh -c "$(curl -fsSL https://starship.rs/install.sh)" -- -y || true
+    # nvm's installer REQUIRES bash — running it under sh aborts with an error.
     [[ -d "$HOME/.nvm" ]] || \
-      sh -c "$(curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh)"
+      bash -c "$(curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh)" || true
     info "NOTE: ghost-complete is macOS-only and is skipped on Linux (the shell"
     info "      config degrades gracefully when it's absent). No special font needed."
   fi
