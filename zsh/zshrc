@@ -90,3 +90,15 @@ elif command -v vim >/dev/null 2>&1; then
 else
   export EDITOR="nano"
 fi
+
+# bun completions
+[ -s "/Users/smartfishtank/.bun/_bun" ] && source "/Users/smartfishtank/.bun/_bun"
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+# Removed 2026-08-10: the value here was a literal placeholder ("sk-ant-oat01-...",
+# 16 chars), not a real token. CLAUDE_CODE_OAUTH_TOKEN overrides the credentials
+# stored in the macOS Keychain, so every new shell started Claude Code
+# unauthenticated and forced a fresh /login. Leave unset to use the Keychain.
+# export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
