@@ -8,7 +8,9 @@ Portable zsh + Ghostty + starship setup for macOS and Linux.
 |------|--------------|---------|
 | `zsh/zshrc` | `~/.zshrc` | Interactive shell: history, lazy nvm, completion cache, plugins, prompt |
 | `zsh/zprofile` | `~/.zprofile` | Homebrew env (macOS or Linuxbrew) |
-| `config/ghostty/config` | `~/.config/ghostty/config` | Terminal: Catppuccin Mocha, bundled JetBrains Mono (no Nerd Font) |
+| `config/ghostty/config` | `~/.config/ghostty/config` | Terminal: SF Mono, block cursor, `theme =` names a file in `themes/` |
+| `config/ghostty/themes/` | `~/.config/ghostty/themes` | Colour schemes: ayu, gruvbox, jellybeans, srcery |
+| `bin/ghostty-theme` | `~/.local/bin/ghostty-theme` | Theme picker — see below |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
 
@@ -70,3 +72,19 @@ Anything private or per-machine (corp CA certs, work remotes, tokens) goes in
   ~250ms load; every shell after starts in ~50ms.
 - Re-running `ghost-complete install` may overwrite the guarded ghost-complete blocks
   in `~/.zshrc` with absolute paths — re-run `./install.sh link` to restore.
+
+## Switching themes
+
+```sh
+ghostty-theme              # picker: arrow keys preview live, enter keeps, esc reverts
+ghostty-theme theme-ayu    # apply directly
+ghostty-theme -l           # list names
+```
+
+Moving through the list repaints the current window immediately via OSC colour
+escapes, so what you see is the real thing rather than a swatch. Enter rewrites
+the `theme =` line in `config`; other already-open Ghostty windows pick it up on
+`Cmd+Shift+,` (or the next time they launch).
+
+To add a theme, drop a Ghostty colour-scheme file into `config/ghostty/themes/`.
+`ghostty +list-themes` shows the bundled ones worth copying from.
