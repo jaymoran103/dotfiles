@@ -26,7 +26,7 @@ install_deps() {
   info "Installing dependencies for $OS"
   if [[ "$OS" == "Darwin" ]]; then
     command -v brew >/dev/null || { info "Install Homebrew first: https://brew.sh"; return; }
-    brew install starship zsh-autosuggestions nvm || true
+    brew install starship zsh-autosuggestions nvm fzf || true
     brew install stanmarek/tap/ghost-complete || true   # macOS-only autocomplete
     command -v ghost-complete >/dev/null && ghost-complete install || true
   elif [[ "$OS" == "Linux" ]]; then
@@ -34,9 +34,9 @@ install_deps() {
     local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
     if command -v apt >/dev/null; then
       $SUDO apt update
-      $SUDO apt install -y zsh zsh-autosuggestions git curl ca-certificates locales
+      $SUDO apt install -y zsh zsh-autosuggestions git curl ca-certificates locales fzf
     elif command -v pacman >/dev/null; then
-      $SUDO pacman -S --needed --noconfirm zsh zsh-autosuggestions git curl
+      $SUDO pacman -S --needed --noconfirm zsh zsh-autosuggestions git curl fzf
     fi
     # Best-effort (|| true): a network/install hiccup must not abort linking.
     command -v starship >/dev/null || \
@@ -53,6 +53,11 @@ link_configs() {
   backup_and_link "$DOTFILES/zsh/zshrc"             "$HOME/.zshrc"
   backup_and_link "$DOTFILES/zsh/zprofile"          "$HOME/.zprofile"
   backup_and_link "$DOTFILES/config/ghostty/config" "$HOME/.config/ghostty/config"
+  # Ghostty resolves a bare `theme = <name>` against ~/.config/ghostty/themes,
+  # so without this link the configured theme silently fails to load.
+  backup_and_link "$DOTFILES/config/ghostty/themes" "$HOME/.config/ghostty/themes"
+  # ~/.local/bin is already put on PATH by zsh/zshrc.
+  backup_and_link "$DOTFILES/bin/ghostty-theme"     "$HOME/.local/bin/ghostty-theme"
   backup_and_link "$DOTFILES/config/starship.toml"  "$HOME/.config/starship.toml"
   backup_and_link "$DOTFILES/git/gitconfig"         "$HOME/.gitconfig"
   if [[ ! -f "$HOME/.gitconfig.local" ]]; then
