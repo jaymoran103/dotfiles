@@ -8,11 +8,18 @@ The transcript in ~/.claude/projects is never touched, so
 
 Shift+Up / Shift+Down reorder the highlighted row. The order is kept in
 ~/.claude/claude-park-order.json and survives restarts.
+
+x deletes a job record outright. That store is all it removes, so the
+transcript and `claude --resume` survive a delete as they do a park.
+
+? opens the key panel. Keys pressed there run as if typed on the list,
+so it doubles as a menu. --keys prints the same list.
 """
 
 import curses
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -29,6 +36,36 @@ STATE_COLOR = {
     "working": 2, "blocked": 3, "done": 4, "stopped": 5,
     "failed": 1, "error": 1, "killed": 1,
 }
+
+# One source for the ? panel and for --keys, so a new binding is written
+# down once. (group, ((keys, what), ...)).
+HELP = (
+    ("move", (("\u2191 \u2193    j k", "highlight a row"),
+              ("g    G", "first row, last row"),
+              ("PgUp PgDn", "jump ten rows"))),
+    ("order", (("\u21e7\u2191 \u21e7\u2193   J K", "move the row in its section"),)),
+    ("park", (("space", "park or unpark the row"),
+              ("A", "park every shown row"),
+              ("U", "unpark every shown row"))),
+    ("delete", (("x", "drop the job record, keep the transcript"),)),
+    ("find", (("/", "filter on name, id, cwd or state"),
+              ("esc", "clear the filter"))),
+    ("other", (("r", "reload from disk"),
+               ("?", "the key panel"),
+               ("q", "quit"))),
+)
+
+
+def help_lines():
+    kw = max(len(k) for _, pairs in HELP for k, _ in pairs)
+    out = []
+    for group, pairs in HELP:
+        if out:
+            out.append("")
+        for i, (keys, what) in enumerate(pairs):
+            out.append("%-7s %-*s  %s" % (group if i == 0 else "", kw, keys, what))
+    return out
+
 
 # Some terminals send CSI cursor keys while terminfo declares SS3 ones (or
 # the reverse), so curses hands back a bare ESC and the tail as plain bytes.
@@ -186,6 +223,22 @@ def toggle(entry):
     return None
 
 
+def remove(entry):
+    """Delete a job record. Only the record, and only from the two stores.
+
+    The transcript under ~/.claude/projects is a separate tree and is not
+    touched, so `claude --resume <session-id>` still works afterwards.
+    """
+    d = os.path.realpath(entry["dir"])
+    if not any(d.startswith(os.path.realpath(b) + os.sep) for b in (JOBS, PARK)):
+        return "%s sits outside the job stores. not deleting" % entry["short"]
+    try:
+        shutil.rmtree(d)
+    except Exception as exc:
+        return "could not delete %s: %s" % (entry["short"], exc)
+    return None
+
+
 def short_cwd(p):
     if p.startswith(HOME):
         p = "~" + p[len(HOME):]
@@ -218,6 +271,59 @@ def pad(s, n):
     return (s[:n] if len(s) > n else s).ljust(n)
 
 
+def help_panel(stdscr):
+    """Show the key list over the list, and return a key to act on.
+
+    Anything but esc, q and enter is handed back to the caller's handler,
+    so reading a key and using it are the same gesture. -1 means the panel
+    was only dismissed. It scrolls when it does not all fit, because a
+    short terminal would otherwise drop the last groups with nothing on
+    screen to say they exist.
+    """
+    body = help_lines()
+    off = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        pw = min(max(len(r) for r in body) + 4, max(24, w - 2))
+        ph = min(len(body) + 5, max(7, h - 2))
+        shown = ph - 5
+        off = max(0, min(off, len(body) - shown))
+        more = len(body) > shown
+        win = curses.newwin(ph, pw, (h - ph) // 2, (w - pw) // 2)
+        win.keypad(True)
+        win.erase()
+        win.box()
+        win.addstr(0, 2, " claude-park keys ", curses.A_BOLD)
+        # Padded for the same reason the list rows are: a scroll redraws
+        # over the old frame, and a shorter line would leave its tail.
+        for i, line in enumerate(body[off:off + shown]):
+            win.addstr(2 + i, 2, pad(fits(line, pw - 4), pw - 4))
+        foot = "esc closes   any other key runs it"
+        if more:
+            foot = "\u2191\u2193 scroll   %d of %d   %s" % (
+                off + shown, len(body), foot)
+        win.addstr(ph - 2, 2, pad(fits(foot, pw - 4), pw - 4), curses.A_DIM)
+        # A scroll shifts most of the panel at once, and curses answers
+        # that with a scroll region spanning the whole line, which drags
+        # the list underneath along with it. redrawwin() drops its record
+        # of these rows so the frame is repainted outright.
+        win.redrawwin()
+        win.refresh()
+        c = read_key(win)
+        if more and c in (curses.KEY_DOWN, ord("j")):
+            off += 1
+        elif more and c in (curses.KEY_UP, ord("k")):
+            off -= 1
+        elif more and c == curses.KEY_NPAGE:
+            off += shown
+        elif more and c == curses.KEY_PPAGE:
+            off -= shown
+        elif c in (27, ord("q"), ord("?"), 10, 13, curses.KEY_ENTER):
+            return -1
+        else:
+            return c
+
+
 def run(stdscr):
     curses.curs_set(0)
     stdscr.keypad(True)
@@ -234,7 +340,7 @@ def run(stdscr):
     entries = load()
     sel = 0
     filt = ""
-    status = "space parks or unparks   \u21e7\u2191\u2193 or JK reorders"
+    status = "space parks or unparks   ? lists every key"
 
     def view():
         if not filt:
@@ -303,18 +409,18 @@ def run(stdscr):
             y += 1
 
         stdscr.addstr(h - 2, 1, pad(status, w - 2), curses.A_DIM)
-        # The full hint line no longer fits a narrow terminal, and pad()
-        # would cut it at "q quit". Drop to the short form instead.
-        keys = (" \u2191\u2193/jk move  \u21e7\u2191\u2193/JK reorder  "
-                "space toggle  / filter  esc clear  "
-                "A park all  U unpark all  r reload  q quit ")
+        # Only the keys worth a glance. ? carries the full list, so this
+        # line stays short enough to survive a narrow terminal intact.
+        keys = (" \u2191\u2193 move   \u21e7\u2191\u2193 reorder   space park   "
+                "x delete   / filter   ? keys   q quit ")
         if len(keys) > w - 1:
-            keys = (" \u2191\u2193 move  \u21e7\u2191\u2193 reorder  space park  "
-                    "/ filter  A/U all  r reload  q quit ")
+            keys = " \u2191\u2193 move  space park  x delete  ? keys  q quit "
         stdscr.addstr(h - 1, 0, pad(keys, w - 1), curses.A_REVERSE)
         stdscr.refresh()
 
         c = read_key(stdscr)
+        if c == ord("?"):
+            c = help_panel(stdscr)
         if c == ord("q"):
             return
         elif c == 27:
@@ -338,6 +444,22 @@ def run(stdscr):
         elif c == ord("r"):
             entries = load()
             status = "reloaded"
+        elif c == ord("x") and rows:
+            e = rows[sel]
+            if e["short"] == SELF:
+                status = "refusing to delete this session's own record"
+            elif ask(stdscr, " delete %s%s? the transcript stays. y/N "
+                     % (e["short"], " while it is %s" % e["state"]
+                        if e["live"] else "")) not in (ord("y"), ord("Y")):
+                status = "kept %s" % e["short"]
+            else:
+                err = remove(e)
+                status = err or "deleted %s" % e["short"]
+                entries = load()
+                # Prune the stale id, but only from an order the user has
+                # already made. A delete should not pin an unsorted list.
+                if not err and os.path.exists(ORDER):
+                    save_order(entries)
         elif c == ord("/"):
             curses.echo()
             stdscr.addstr(h - 1, 0, " filter: ".ljust(w - 1), curses.A_REVERSE)
@@ -388,6 +510,13 @@ def main():
     args = sys.argv[1:]
     if "-h" in args or "--help" in args:
         print(__doc__)
+        print("keys\n")
+        for line in help_lines():
+            print("  " + line if line else "")
+        return
+    if "--keys" in args:
+        for line in help_lines():
+            print(line)
         return
     if "--list" in args or not sys.stdout.isatty():
         plain(load())
