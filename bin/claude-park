@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""claude-park — manage visibility of Claude Code background sessions.
+
+Parking moves a session's job record from ~/.claude/jobs into
+~/.claude/jobs-parked. The row disappears from `claude agents`.
+The transcript in ~/.claude/projects is never touched, so
+`claude --resume <session-id>` still works. Unparking puts it back.
+
+Shift+Up / Shift+Down reorder the highlighted row. The order is kept in
+~/.claude/claude-park-order.json and survives restarts.
+"""
+
+import curses
+import json
+import os
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+JOBS = os.environ.get("CLAUDE_JOBS_DIR", os.path.join(HOME, ".claude", "jobs"))
+PARK = os.environ.get("CLAUDE_PARK_DIR", os.path.join(HOME, ".claude", "jobs-parked"))
+ORDER = os.environ.get("CLAUDE_PARK_ORDER",
+                       os.path.join(HOME, ".claude", "claude-park-order.json"))
+
+TERMINAL = {"done", "stopped", "failed", "error", "killed", "cancelled", "exited"}
+SELF = os.path.basename(os.environ.get("CLAUDE_JOB_DIR", "").rstrip("/"))
+
+STATE_COLOR = {
+    "working": 2, "blocked": 3, "done": 4, "stopped": 5,
+    "failed": 1, "error": 1, "killed": 1,
+}
+
+# Some terminals send CSI cursor keys while terminfo declares SS3 ones (or
+# the reverse), so curses hands back a bare ESC and the tail as plain bytes.
+# read_key() reassembles those itself instead of treating ESC as a keypress.
+ESC_SEQS = {
+    "[A": curses.KEY_UP, "OA": curses.KEY_UP,
+    "[B": curses.KEY_DOWN, "OB": curses.KEY_DOWN,
+    "[C": curses.KEY_RIGHT, "OC": curses.KEY_RIGHT,
+    "[D": curses.KEY_LEFT, "OD": curses.KEY_LEFT,
+    "[H": curses.KEY_HOME, "OH": curses.KEY_HOME, "[1~": curses.KEY_HOME,
+    "[F": curses.KEY_END, "OF": curses.KEY_END, "[4~": curses.KEY_END,
+    "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE,
+    # Shift+Up/Down. xterm-style modifiers first, then rxvt's short form.
+    # KEY_SR/KEY_SF are what terminfo calls them, so the handler needs one
+    # name for both routes.
+    "[1;2A": curses.KEY_SR, "[1;2B": curses.KEY_SF,
+    "[a": curses.KEY_SR, "[b": curses.KEY_SF,
+}
+
+
+def read_key(win):
+    c = win.getch()
+    if c != 27:
+        return c
+    seq = ""
+    win.nodelay(True)
+    try:
+        deadline = time.time() + 0.05
+        while time.time() < deadline and len(seq) < 10:
+            n = win.getch()
+            if n == -1:
+                time.sleep(0.004)
+                continue
+            seq += chr(n)
+            if seq in ESC_SEQS:
+                return ESC_SEQS[seq]
+            if seq[-1].isalpha() or seq[-1] == "~":
+                break
+    finally:
+        win.nodelay(False)
+    if seq and seq[-1] in "ABCD":
+        return ESC_SEQS.get("[" + seq[-1], 27)
+    return 27
+
+
+def parse_iso(s):
+    if not s:
+        return 0.0
+    try:
+        t = time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
+        return time.mktime(t) - time.timezone
+    except Exception:
+        return 0.0
+
+
+def ago(ts):
+    if not ts:
+        return "-"
+    d = max(0, time.time() - ts)
+    for cut, unit, div in ((60, "s", 1), (3600, "m", 60), (86400, "h", 3600),
+                           (604800, "d", 86400)):
+        if d < cut:
+            return "%d%s" % (int(d // div), unit)
+    return "%dw" % int(d // 604800)
+
+
+def load_order():
+    """Map job id -> hand-placed rank. Missing file means no hand order."""
+    try:
+        with open(ORDER) as fh:
+            ids = json.load(fh).get("order") or []
+    except Exception:
+        return {}
+    return {k: i for i, k in enumerate(ids) if isinstance(k, str)}
+
+
+def save_order(entries):
+    """Snapshot the whole list. Ids that no longer exist are dropped."""
+    tmp = ORDER + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump({"order": [e["short"] for e in entries]}, fh)
+        os.replace(tmp, ORDER)
+    except Exception as exc:
+        return "could not save order: %s" % exc
+    return None
+
+
+def load():
+    out = []
+    for base, parked in ((JOBS, False), (PARK, True)):
+        if not os.path.isdir(base):
+            continue
+        for name in sorted(os.listdir(base)):
+            d = os.path.join(base, name)
+            sf = os.path.join(d, "state.json")
+            if not os.path.isdir(d) or not os.path.isfile(sf):
+                continue
+            try:
+                with open(sf) as fh:
+                    st = json.load(fh)
+            except Exception:
+                st = {}
+            state = st.get("state") or "?"
+            label = st.get("name") or (st.get("intent") or "")[:48] or name
+            out.append({
+                "short": name,
+                "dir": d,
+                "parked": parked,
+                "state": state,
+                "live": state not in TERMINAL,
+                "name": label,
+                "cwd": st.get("cwd") or "",
+                "session": st.get("sessionId") or "",
+                "ts": parse_iso(st.get("updatedAt") or st.get("createdAt")),
+            })
+    rank = load_order()
+    out.sort(key=lambda e: (e["parked"],
+                            1 if e["short"] in rank else 0,
+                            rank.get(e["short"], -e["ts"])))
+    return out
+
+
+def move(entries, rows, sel, delta):
+    """Swap the highlighted row with its neighbour in the visible list.
+
+    Under a filter the neighbour is the next *shown* row, so the entry
+    hops over anything hidden. What you see is what moves. Only entries
+    is reordered; rows is rebuilt by the draw loop on the next pass.
+    """
+    tgt = sel + delta
+    if not rows:
+        return sel, "nothing to move"
+    if tgt < 0 or tgt >= len(rows):
+        return sel, "already at the %s" % ("top" if delta < 0 else "bottom")
+    a, b = rows[sel], rows[tgt]
+    if a["parked"] != b["parked"]:
+        return sel, "reorder stays in one section. space parks or unparks"
+    i, j = entries.index(a), entries.index(b)
+    entries[i], entries[j] = entries[j], entries[i]
+    err = save_order(entries)
+    return tgt, err or ("moved %s %s"
+                        % (a["short"], "up" if delta < 0 else "down"))
+
+
+def toggle(entry):
+    """Move a job record between the live and parked stores."""
+    dest_base = JOBS if entry["parked"] else PARK
+    if not os.path.isdir(dest_base):
+        os.makedirs(dest_base)
+    dest = os.path.join(dest_base, entry["short"])
+    if os.path.exists(dest):
+        return "%s already exists in %s" % (entry["short"], dest_base)
+    os.rename(entry["dir"], dest)
+    return None
+
+
+def short_cwd(p):
+    if p.startswith(HOME):
+        p = "~" + p[len(HOME):]
+    parts = [x for x in p.split("/") if x]
+    return "/".join(parts[-2:]) if len(parts) > 2 else p
+
+
+def plain(entries):
+    print("%-9s %-8s %-9s %-30s %-28s %s"
+          % ("VIS", "ID", "STATE", "NAME", "CWD", "AGE"))
+    for e in entries:
+        print("%-9s %-8s %-9s %-30s %-28s %s"
+              % ("parked" if e["parked"] else "visible", e["short"],
+                 e["state"], e["name"][:30], short_cwd(e["cwd"])[:28],
+                 ago(e["ts"])))
+
+
+def fits(s, n):
+    return s if len(s) <= n else s[:max(0, n - 1)] + "…"
+
+
+def pad(s, n):
+    """Trim or space-fill to exactly n cells.
+
+    Every drawn line is padded so each frame rewrites whole rows. Without
+    this, a shorter line leaves the tail of the previous frame on screen
+    when the terminal does not honour the erase curses emits for it.
+    """
+    n = max(0, n)
+    return (s[:n] if len(s) > n else s).ljust(n)
+
+
+def run(stdscr):
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    if hasattr(curses, "set_escdelay"):
+        curses.set_escdelay(25)
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        for i, c in ((1, curses.COLOR_RED), (2, curses.COLOR_GREEN),
+                     (3, curses.COLOR_YELLOW), (4, curses.COLOR_CYAN),
+                     (5, curses.COLOR_WHITE), (6, curses.COLOR_MAGENTA)):
+            curses.init_pair(i, c, -1)
+
+    entries = load()
+    sel = 0
+    filt = ""
+    status = "space parks or unparks   \u21e7\u2191\u2193 or JK reorders"
+
+    def view():
+        if not filt:
+            return entries
+        f = filt.lower()
+        return [e for e in entries
+                if f in e["name"].lower() or f in e["short"]
+                or f in e["cwd"].lower() or f in e["state"]]
+
+    def ask(win, prompt):
+        h, w = win.getmaxyx()
+        win.addstr(h - 1, 0, pad(prompt, w - 1), curses.A_REVERSE)
+        win.refresh()
+        return win.getch()
+
+    while True:
+        rows = view()
+        if sel >= len(rows):
+            sel = max(0, len(rows) - 1)
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        nvis = sum(1 for e in entries if not e["parked"])
+        npark = len(entries) - nvis
+        head = " claude-park   %d visible   %d parked" % (nvis, npark)
+        if filt:
+            head += "   filter:%s" % filt
+        stdscr.addstr(0, 0, pad(head, w - 1), curses.A_REVERSE)
+
+        name_w = max(12, int((w - 34) * 0.5))
+        cwd_w = max(10, w - 34 - name_w)
+        stdscr.addstr(1, 2, pad("%-8s %-8s %-*s %-*s %s"
+                                % ("ID", "STATE", name_w, "NAME",
+                                   cwd_w, "CWD", "AGE"), w - 3), curses.A_DIM)
+
+        top = max(0, sel - (h - 6))
+        y = 2
+        drew_sep = False
+        for i, e in enumerate(rows[top:], start=top):
+            if y >= h - 2:
+                break
+            if e["parked"] and not drew_sep:
+                drew_sep = True
+                stdscr.addstr(y, 2, pad("── parked "
+                                        + "─" * w, w - 3), curses.A_DIM)
+                y += 1
+                if y >= h - 2:
+                    break
+            mark = "·" if e["parked"] else "●"
+            line = "%s %-8s %-8s %-*s %-*s %s" % (
+                mark, e["short"], e["state"][:8], name_w,
+                fits(e["name"], name_w), cwd_w,
+                fits(short_cwd(e["cwd"]), cwd_w), ago(e["ts"]))
+            attr = curses.A_REVERSE if i == sel else 0
+            if e["parked"]:
+                attr |= curses.A_DIM
+            elif curses.has_colors():
+                attr |= curses.color_pair(STATE_COLOR.get(e["state"], 5))
+            if e["short"] == SELF:
+                attr |= curses.A_BOLD
+            stdscr.addstr(y, 1, pad(line, w - 2), attr)
+            y += 1
+
+        while y < h - 2:
+            stdscr.addstr(y, 0, pad("", w - 1))
+            y += 1
+
+        stdscr.addstr(h - 2, 1, pad(status, w - 2), curses.A_DIM)
+        # The full hint line no longer fits a narrow terminal, and pad()
+        # would cut it at "q quit". Drop to the short form instead.
+        keys = (" \u2191\u2193/jk move  \u21e7\u2191\u2193/JK reorder  "
+                "space toggle  / filter  esc clear  "
+                "A park all  U unpark all  r reload  q quit ")
+        if len(keys) > w - 1:
+            keys = (" \u2191\u2193 move  \u21e7\u2191\u2193 reorder  space park  "
+                    "/ filter  A/U all  r reload  q quit ")
+        stdscr.addstr(h - 1, 0, pad(keys, w - 1), curses.A_REVERSE)
+        stdscr.refresh()
+
+        c = read_key(stdscr)
+        if c == ord("q"):
+            return
+        elif c == 27:
+            filt, sel, status = "", 0, "filter cleared"
+        elif c in (curses.KEY_DOWN, ord("j")):
+            sel = min(sel + 1, max(0, len(rows) - 1))
+        elif c in (curses.KEY_UP, ord("k")):
+            sel = max(sel - 1, 0)
+        elif c in (curses.KEY_HOME, ord("g")):
+            sel = 0
+        elif c in (curses.KEY_END, ord("G")):
+            sel = max(0, len(rows) - 1)
+        elif c == curses.KEY_NPAGE:
+            sel = min(sel + 10, max(0, len(rows) - 1))
+        elif c == curses.KEY_PPAGE:
+            sel = max(sel - 10, 0)
+        elif c in (curses.KEY_SR, ord("K")):
+            sel, status = move(entries, rows, sel, -1)
+        elif c in (curses.KEY_SF, ord("J")):
+            sel, status = move(entries, rows, sel, 1)
+        elif c == ord("r"):
+            entries = load()
+            status = "reloaded"
+        elif c == ord("/"):
+            curses.echo()
+            stdscr.addstr(h - 1, 0, " filter: ".ljust(w - 1), curses.A_REVERSE)
+            stdscr.move(h - 1, 9)
+            try:
+                filt = stdscr.getstr().decode("utf-8", "replace").strip()
+            except Exception:
+                filt = ""
+            curses.noecho()
+            sel = 0
+        elif c == ord(" ") and rows:
+            e = rows[sel]
+            if e["short"] == SELF and not e["parked"]:
+                status = "refusing to park this session's own record"
+            elif e["live"] and not e["parked"] and ask(
+                    stdscr, " %s is %s. Park anyway? y/N " % (e["short"], e["state"])
+            ) not in (ord("y"), ord("Y")):
+                status = "left %s alone" % e["short"]
+            else:
+                err = toggle(e)
+                status = err or ("%s %s" % (
+                    "unparked" if e["parked"] else "parked", e["short"]))
+                entries = load()
+        elif c == ord("A"):
+            todo = [e for e in view()
+                    if not e["parked"] and e["short"] != SELF]
+            if not todo:
+                status = "nothing to park"
+            elif ask(stdscr, " Park %d sessions? y/N " % len(todo)) in (
+                    ord("y"), ord("Y")):
+                for e in todo:
+                    toggle(e)
+                entries = load()
+                status = "parked %d" % len(todo)
+        elif c == ord("U"):
+            todo = [e for e in view() if e["parked"]]
+            if not todo:
+                status = "nothing parked"
+            elif ask(stdscr, " Unpark %d sessions? y/N " % len(todo)) in (
+                    ord("y"), ord("Y")):
+                for e in todo:
+                    toggle(e)
+                entries = load()
+                status = "unparked %d" % len(todo)
+
+
+def main():
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return
+    if "--list" in args or not sys.stdout.isatty():
+        plain(load())
+        return
+    curses.wrapper(run)
+
+
+if __name__ == "__main__":
+    main()
