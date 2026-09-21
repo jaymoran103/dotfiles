@@ -12,7 +12,7 @@ Shift+Up / Shift+Down reorder the highlighted row. The order is kept in
 x deletes a job record outright. That store is all it removes, so the
 transcript and `claude --resume` survive a delete as they do a park.
 
-? opens the key panel. Keys pressed there run as if typed on the list,
+h opens the key panel. Keys pressed there run as if typed on the list,
 so it doubles as a menu. --keys prints the same list.
 """
 
@@ -48,10 +48,10 @@ HELP = (
               ("A", "park every shown row"),
               ("U", "unpark every shown row"))),
     ("delete", (("x", "drop the job record, keep the transcript"),)),
-    ("find", (("/", "filter on name, id, cwd or state"),
+    ("find", (("f", "filter on name, id, cwd or state"),
               ("esc", "clear the filter"))),
     ("other", (("r", "reload from disk"),
-               ("?", "the key panel"),
+               ("h    ?", "the key panel"),
                ("q", "quit"))),
 )
 
@@ -318,7 +318,7 @@ def help_panel(stdscr):
             off += shown
         elif more and c == curses.KEY_PPAGE:
             off -= shown
-        elif c in (27, ord("q"), ord("?"), 10, 13, curses.KEY_ENTER):
+        elif c in (27, ord("q"), ord("h"), ord("?"), 10, 13, curses.KEY_ENTER):
             return -1
         else:
             return c
@@ -340,7 +340,7 @@ def run(stdscr):
     entries = load()
     sel = 0
     filt = ""
-    status = "space parks or unparks   ? lists every key"
+    status = "space parks or unparks   h lists every key"
 
     def view():
         if not filt:
@@ -412,14 +412,14 @@ def run(stdscr):
         # Only the keys worth a glance. ? carries the full list, so this
         # line stays short enough to survive a narrow terminal intact.
         keys = (" \u2191\u2193 move   \u21e7\u2191\u2193 reorder   space park   "
-                "x delete   / filter   ? keys   q quit ")
+                "x delete   f filter   h keys   q quit ")
         if len(keys) > w - 1:
-            keys = " \u2191\u2193 move  space park  x delete  ? keys  q quit "
+            keys = " \u2191\u2193 move  space park  x delete  h keys  q quit "
         stdscr.addstr(h - 1, 0, pad(keys, w - 1), curses.A_REVERSE)
         stdscr.refresh()
 
         c = read_key(stdscr)
-        if c == ord("?"):
+        if c in (ord("h"), ord("?")):
             c = help_panel(stdscr)
         if c == ord("q"):
             return
@@ -460,7 +460,7 @@ def run(stdscr):
                 # already made. A delete should not pin an unsorted list.
                 if not err and os.path.exists(ORDER):
                     save_order(entries)
-        elif c == ord("/"):
+        elif c == ord("f"):
             curses.echo()
             stdscr.addstr(h - 1, 0, " filter: ".ljust(w - 1), curses.A_REVERSE)
             stdscr.move(h - 1, 9)
