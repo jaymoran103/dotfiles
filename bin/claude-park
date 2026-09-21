@@ -41,8 +41,7 @@ STATE_COLOR = {
 # down once. (group, ((keys, what), ...)).
 HELP = (
     ("move", (("\u2191 \u2193    j k", "highlight a row"),
-              ("g    G", "first row, last row"),
-              ("PgUp PgDn", "jump ten rows"))),
+              ("g    G", "first row, last row"))),
     ("order", (("\u21e7\u2191 \u21e7\u2193   J K", "move the row in its section"),)),
     ("park", (("space", "park or unpark the row"),
               ("A", "park every shown row"),
@@ -77,6 +76,8 @@ ESC_SEQS = {
     "[D": curses.KEY_LEFT, "OD": curses.KEY_LEFT,
     "[H": curses.KEY_HOME, "OH": curses.KEY_HOME, "[1~": curses.KEY_HOME,
     "[F": curses.KEY_END, "OF": curses.KEY_END, "[4~": curses.KEY_END,
+    # PgUp and PgDn do nothing, but they are decoded so that a stray
+    # fn+arrow is swallowed instead of arriving as a bare ESC.
     "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE,
     # Shift+Up/Down. xterm-style modifiers first, then rxvt's short form.
     # KEY_SR/KEY_SF are what terminfo calls them, so the handler needs one
@@ -314,10 +315,6 @@ def help_panel(stdscr):
             off += 1
         elif more and c in (curses.KEY_UP, ord("k")):
             off -= 1
-        elif more and c == curses.KEY_NPAGE:
-            off += shown
-        elif more and c == curses.KEY_PPAGE:
-            off -= shown
         elif c in (27, ord("q"), ord("h"), ord("?"), 10, 13, curses.KEY_ENTER):
             return -1
         else:
@@ -433,10 +430,6 @@ def run(stdscr):
             sel = 0
         elif c in (curses.KEY_END, ord("G")):
             sel = max(0, len(rows) - 1)
-        elif c == curses.KEY_NPAGE:
-            sel = min(sel + 10, max(0, len(rows) - 1))
-        elif c == curses.KEY_PPAGE:
-            sel = max(sel - 10, 0)
         elif c in (curses.KEY_SR, ord("K")):
             sel, status = move(entries, rows, sel, -1)
         elif c in (curses.KEY_SF, ord("J")):
