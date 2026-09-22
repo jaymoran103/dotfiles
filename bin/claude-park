@@ -224,6 +224,36 @@ def toggle(entry):
     return None
 
 
+def recheck(shorts):
+    """Undo any park the daemon reversed. Returns a status or None.
+
+    A session the daemon still holds gets a fresh stub record in JOBS the
+    moment its folder leaves, so a park would show the same session twice.
+    Give the daemon a beat, then drop the stub and put the real record back.
+    """
+    if not shorts:
+        return None
+    time.sleep(1)
+    back, errs = [], []
+    for s in shorts:
+        stub = os.path.join(JOBS, s)
+        if not os.path.exists(stub):
+            continue
+        try:
+            shutil.rmtree(stub)
+            os.rename(os.path.join(PARK, s), stub)
+        except Exception as exc:
+            errs.append("could not restore %s: %s" % (s, exc))
+            continue
+        back.append(s)
+    if errs:
+        return ". ".join(errs)
+    if back:
+        return ("daemon still holds %s. left it visible. stop it, then park"
+                % " ".join(back))
+    return None
+
+
 def remove(entry):
     """Delete a job record. Only the record, and only from the two stores.
 
@@ -473,6 +503,8 @@ def run(stdscr):
                 status = "left %s alone" % e["short"]
             else:
                 err = toggle(e)
+                if not err and not e["parked"]:
+                    err = recheck([e["short"]])
                 status = err or ("%s %s" % (
                     "unparked" if e["parked"] else "parked", e["short"]))
                 entries = load()
@@ -483,10 +515,10 @@ def run(stdscr):
                 status = "nothing to park"
             elif ask(stdscr, " Park %d sessions? y/N " % len(todo)) in (
                     ord("y"), ord("Y")):
-                for e in todo:
-                    toggle(e)
+                done = [e["short"] for e in todo if toggle(e) is None]
+                err = recheck(done)
                 entries = load()
-                status = "parked %d" % len(todo)
+                status = err or "parked %d" % len(done)
         elif c == ord("U"):
             todo = [e for e in view() if e["parked"]]
             if not todo:
