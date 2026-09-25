@@ -32,8 +32,10 @@ ORDER = os.environ.get("CLAUDE_PARK_ORDER",
 TERMINAL = {"done", "stopped", "failed", "error", "killed", "cancelled", "exited"}
 SELF = os.path.basename(os.environ.get("CLAUDE_JOB_DIR", "").rstrip("/"))
 
+# Row background per state, to match the Claude UI. A state not
+# listed here draws in the terminal's own colours.
 STATE_COLOR = {
-    "working": 2, "blocked": 3, "done": 4, "stopped": 5,
+    "working": 2, "blocked": 3, "done": 4,
     "failed": 1, "error": 1, "killed": 1,
 }
 
@@ -360,9 +362,8 @@ def run(stdscr):
         curses.start_color()
         curses.use_default_colors()
         for i, c in ((1, curses.COLOR_RED), (2, curses.COLOR_GREEN),
-                     (3, curses.COLOR_YELLOW), (4, curses.COLOR_CYAN),
-                     (5, curses.COLOR_WHITE), (6, curses.COLOR_MAGENTA)):
-            curses.init_pair(i, c, -1)
+                     (3, curses.COLOR_YELLOW), (4, curses.COLOR_CYAN)):
+            curses.init_pair(i, curses.COLOR_BLACK, c)
 
     entries = load()
     sel = 0
@@ -421,11 +422,13 @@ def run(stdscr):
                 mark, e["short"], e["state"][:8], name_w,
                 fits(e["name"], name_w), cwd_w,
                 fits(short_cwd(e["cwd"]), cwd_w), ago(e["ts"]))
+            # The highlight is reverse video on every row. On a coloured row
+            # that turns it into coloured text on black, so it still stands out.
             attr = curses.A_REVERSE if i == sel else 0
             if e["parked"]:
                 attr |= curses.A_DIM
-            elif curses.has_colors():
-                attr |= curses.color_pair(STATE_COLOR.get(e["state"], 5))
+            elif curses.has_colors() and e["state"] in STATE_COLOR:
+                attr |= curses.color_pair(STATE_COLOR[e["state"]])
             if e["short"] == SELF:
                 attr |= curses.A_BOLD
             stdscr.addstr(y, 1, pad(line, w - 2), attr)
