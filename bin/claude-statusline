@@ -1,0 +1,10 @@
+#!/bin/sh
+# Claude Code status line: pwd, git branch, context used, 5h/7d usage left.
+in=$(cat)
+dir=$(printf '%s' "$in" | jq -r '.workspace.current_dir // .cwd')
+short=$(printf '%s' "$dir" | sed "s|^$HOME|~|")
+branch=$(git -C "$dir" branch --show-current 2>/dev/null)
+dirty=$(git -C "$dir" status --porcelain 2>/dev/null | head -1)
+printf '%s' "$in" | jq -r --arg d "$short" --arg b "$branch" --arg x "${dirty:+*}" '
+  def left(w): if w then "\(100 - w.used_percentage | floor)%" else "-" end;
+  "\($d)\(if $b != "" then " \($b)\($x)" else "" end) · ctx \(.context_window.used_percentage // 0 | floor)% · 5h \(left(.rate_limits.five_hour)) · 7d \(left(.rate_limits.seven_day))"'
