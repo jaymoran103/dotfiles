@@ -11,6 +11,7 @@ Portable zsh + Ghostty + starship setup for macOS and Linux.
 | `config/ghostty/config` | `~/.config/ghostty/config` | Terminal: SF Mono, block cursor, `theme =` names a file in `themes/` |
 | `config/ghostty/themes/` | `~/.config/ghostty/themes` | Colour schemes: ayu, gruvbox, jellybeans, srcery |
 | `bin/ghostty-theme` | `~/.local/bin/ghostty-theme` | Theme picker — see below |
+| `bin/icons-batch` | `~/.local/bin/icons-batch` | One DiceBear blob PNG per seed, into `icons-<timestamp>/` |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
 
