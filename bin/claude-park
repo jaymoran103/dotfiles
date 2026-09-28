@@ -10,8 +10,9 @@ Shift+Up / Shift+Down reorder the highlighted row. The order is kept in
 ~/.claude/claude-park-order.json and survives restarts.
 
 Ctrl+S groups each section by cwd, as `claude agents` does, and back to
-recency. Enter on a group's title row folds or unfolds it. The view and
-the folded groups are kept in the same file.
+recency. Enter on a title row folds or unfolds that group, or that
+section in the recency view. - folds every one and + unfolds them. The
+view and the folded rows are kept in the same file.
 
 Ctrl+X deletes a job record outright. That store is all it removes, so the
 transcript and `claude --resume` survive a delete as they do a park.
@@ -64,7 +65,8 @@ HELP = (
               ("g    G", "first row, last row"))),
     ("order", (("\u21e7\u2191 \u21e7\u2193   J K", "move the row in its section or group"),)),
     ("group", (("^s", "group by cwd, or back to recency"),
-               ("enter", "fold or unfold the group"))),
+               ("enter", "fold or unfold the group or section"),
+               ("-    +", "fold all, unfold all"))),
     ("park", (("space", "park or unpark the row"),
               ("A", "park every shown row"),
               ("U", "unpark every shown row"))),
@@ -218,9 +220,28 @@ def grouped_rows(shown, folded):
             key = ("parked:" if parked else "visible:") + cwd
             is_open = key not in folded
             out.append({"kind": "group", "key": key, "parked": parked,
-                        "cwd": cwd, "n": len(by[cwd]), "open": is_open})
+                        "cwd": cwd, "label": tilde(cwd) or "(no cwd)",
+                        "n": len(by[cwd]), "open": is_open})
             if is_open:
                 out.extend(by[cwd])
+    return out
+
+
+def section_rows(shown, folded):
+    """The recency view. A title row above the visible and parked halves."""
+    out = []
+    for parked in (False, True):
+        sec = [e for e in shown if e["parked"] == parked]
+        if not sec:
+            continue
+        label = "parked" if parked else "visible"
+        key = "section:" + label
+        is_open = key not in folded
+        out.append({"kind": "section", "key": key, "parked": parked,
+                    "cwd": None, "label": label, "n": len(sec),
+                    "open": is_open})
+        if is_open:
+            out.extend(sec)
     return out
 
 
@@ -274,7 +295,9 @@ def move(entries, rows, sel, delta):
         return sel, "already at the %s" % ("top" if delta < 0 else "bottom")
     a, b = rows[sel], rows[tgt]
     if a.get("kind"):
-        return sel, "a group row does not move. enter folds it"
+        return sel, "a title row does not move. enter folds it"
+    if b.get("kind") == "section":
+        return sel, "reorder stays in one section. space parks or unparks"
     if b.get("kind"):
         # Title rows sit between groups, so this is the edge of one.
         return sel, "reorder stays in its group"
@@ -527,7 +550,8 @@ def run(stdscr):
         return win.getch()
 
     while True:
-        rows = grouped_rows(view(), folded) if grouped else list(view())
+        layout = grouped_rows if grouped else section_rows
+        rows = layout(view(), folded)
         if want is not None:
             # Keep the highlight on the same row across a regroup.
             sel = next((i for i, r in enumerate(rows) if ident(r) == want), sel)
@@ -559,7 +583,8 @@ def run(stdscr):
         for i, e in enumerate(rows[top:], start=top):
             if y >= h - 2:
                 break
-            if e["parked"] and not drew_sep:
+            # The recency view's title rows already mark the split.
+            if grouped and e["parked"] and not drew_sep:
                 drew_sep = True
                 stdscr.addstr(y, 2, pad("── parked "
                                         + "─" * w, w - 3), curses.A_DIM)
@@ -569,7 +594,7 @@ def run(stdscr):
             if e.get("kind"):
                 _, a = plain_attr(e, i == sel)
                 label = " %s %s  %d" % ("\u25be" if e["open"] else "\u25b8",
-                                        tilde(e["cwd"]) or "(no cwd)", e["n"])
+                                        e["label"], e["n"])
                 stdscr.addstr(y, 1, pad(label, w - 2), a | curses.A_BOLD)
                 y += 1
                 continue
@@ -643,7 +668,7 @@ def run(stdscr):
                 # group's first session.
                 if cur.get("kind"):
                     cur = next((e for e in view() if e["parked"] == cur["parked"]
-                                and e["cwd"] == cur["cwd"]), cur)
+                                and cur["cwd"] in (None, e["cwd"])), cur)
                 want = ident(cur)
             err = write_saved(grouped=grouped)
             # Most rows shift at once. Left to itself curses answers that
@@ -657,9 +682,25 @@ def run(stdscr):
             err = write_saved(folded=sorted(folded))
             stdscr.clear()
             status = err or "%s %s" % ("unfolded" if g["key"] not in folded
-                                       else "folded", tilde(g["cwd"]))
+                                       else "folded", g["label"])
+        elif c in (ord("-"), ord("+"), ord("=")):
+            # Every title row in this view, not just the filtered ones.
+            keys = {r["key"] for r in layout(entries, set()) if r.get("kind")}
+            if c == ord("-"):
+                folded |= keys
+                if rows:
+                    # Land on the title row of the group the highlight was in.
+                    want = next((ident(r) for r in reversed(rows[:sel + 1])
+                                 if r.get("kind")), None)
+            else:
+                if rows:
+                    want = ident(rows[sel])
+                folded -= keys
+            err = write_saved(folded=sorted(folded))
+            stdscr.clear()
+            status = err or ("folded all" if c == ord("-") else "unfolded all")
         elif c in (CTRL_X, ord(" ")) and rows and rows[sel].get("kind"):
-            status = "that is a group row. enter folds it"
+            status = "that is a title row. enter folds it"
         elif c == CTRL_X and rows:
             e = rows[sel]
             if e["short"] == SELF:
