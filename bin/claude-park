@@ -14,6 +14,11 @@ recency. Enter on a title row folds or unfolds that group, or that
 section in the recency view. - folds every one and + unfolds them. The
 view and the folded rows are kept in the same file.
 
+The daemon can remake a record in ~/.claude/jobs after a park, so one
+session shows twice, once in each list. Both rows then carry a ◆ and
+say so. Space on either puts the parked copy back in place of the new
+one. ^x drops just the copy it is on.
+
 A risky key does nothing on its first press. It turns the rows it would
 touch red and says what a second press does. Any other key cancels.
 
@@ -72,10 +77,10 @@ HELP = (
     ("group", (("^s", "group by cwd, or back to recency"),
                ("enter", "fold or unfold the group or section"),
                ("-    +", "fold all, unfold all"))),
-    ("park", (("space", "park or unpark the row"),
+    ("park", (("space", "park or unpark the row. on a \u25c6 row, put the parked copy back"),
               ("A", "park every shown row"),
               ("U", "unpark every shown row"))),
-    ("delete", (("^x", "drop the job record, keep the transcript"),)),
+    ("delete", (("^x", "drop this row's record, keep the transcript"),)),
     ("confirm", (("twice", "^x, A, U, and space on a live row"),
                  ("", "any other key cancels"))),
     ("find", (("f", "filter on name, id, cwd or state"),
@@ -270,6 +275,7 @@ def load():
             state = st.get("state") or "?"
             label = st.get("name") or (st.get("intent") or "")[:48] or name
             out.append({
+                "uid": ("parked/" if parked else "live/") + name,
                 "short": name,
                 "dir": d,
                 "parked": parked,
@@ -281,6 +287,10 @@ def load():
                 "session": st.get("sessionId") or "",
                 "ts": parse_iso(st.get("updatedAt") or st.get("createdAt")),
             })
+    both = ({e["short"] for e in out if e["parked"]}
+            & {e["short"] for e in out if not e["parked"]})
+    for e in out:
+        e["dup"] = e["short"] in both
     rank = load_order()
     out.sort(key=lambda e: (e["parked"],
                             1 if e["short"] in rank else 0,
@@ -329,6 +339,17 @@ def toggle(entry):
     return None
 
 
+def restore(short):
+    """Drop the record in JOBS and put the parked one back in its place."""
+    stub = os.path.join(JOBS, short)
+    try:
+        shutil.rmtree(stub)
+        os.rename(os.path.join(PARK, short), stub)
+    except Exception as exc:
+        return "could not restore %s: %s" % (short, exc)
+    return None
+
+
 def recheck(shorts):
     """Undo any park the daemon reversed. Returns a status or None.
 
@@ -344,11 +365,9 @@ def recheck(shorts):
         stub = os.path.join(JOBS, s)
         if not os.path.exists(stub):
             continue
-        try:
-            shutil.rmtree(stub)
-            os.rename(os.path.join(PARK, s), stub)
-        except Exception as exc:
-            errs.append("could not restore %s: %s" % (s, exc))
+        err = restore(s)
+        if err:
+            errs.append(err)
             continue
         back.append(s)
     if errs:
@@ -548,7 +567,7 @@ def run(stdscr):
     status = "space parks or unparks   h lists every key"
 
     def ident(item):
-        return item.get("key") or item["short"]
+        return item.get("key") or item["uid"]
 
     def view():
         if not filt:
@@ -562,6 +581,7 @@ def run(stdscr):
     # holds the key and the ids it would touch, so a second press only
     # counts while it still means the same rows.
     armed = None
+    drawn = None
 
     def warn_attr():
         if not curses.has_colors():
@@ -621,9 +641,9 @@ def run(stdscr):
                 stdscr.addstr(y, 1, pad(label, w - 2), a | curses.A_BOLD)
                 y += 1
                 continue
-            mark = "·" if e["parked"] else "●"
+            mark = "\u25c6" if e["dup"] else "·" if e["parked"] else "●"
             plain_a, state_a, blip_a = row_attrs(e, i == sel)
-            if armed and e["short"] in armed["ids"]:
+            if armed and e["uid"] in armed["ids"]:
                 plain_a = state_a = warn_attr()
             cells = (
                 (" %s %-8s " % (mark, e["short"]), plain_a),
@@ -648,11 +668,22 @@ def run(stdscr):
             stdscr.addstr(y, 0, pad("", w - 1))
             y += 1
 
-        stdscr.addstr(h - 2, 1, pad(status, w - 2),
-                      (pair(curses.COLOR_RED, -1) | curses.A_BOLD) if armed
-                      else curses.A_DIM)
+        status_a = curses.A_DIM
+        line = status
+        if armed:
+            status_a = pair(curses.COLOR_RED, -1) | curses.A_BOLD
+        elif rows and rows[sel].get("dup") and status == drawn:
+            # Say what the doubled row is while it is under the highlight,
+            # once any fresh status has had its frame.
+            e = rows[sel]
+            line = ("\u25c6 %s is in both lists. space puts the parked copy "
+                    "back. ^x drops this %s copy" % (
+                        e["short"], "parked" if e["parked"] else "live"))
+            status_a = pair(curses.COLOR_YELLOW, -1) | curses.A_BOLD
+        stdscr.addstr(h - 2, 1, pad(line, w - 2), status_a)
+        drawn = status
         x = w - 2 - len(RAINBOW)
-        if x > len(status) + 2:
+        if x > len(line) + 2:
             for name in RAINBOW:
                 stdscr.addstr(h - 2, x, " ", swatch(name) or curses.A_DIM)
                 x += 1
@@ -751,7 +782,17 @@ def run(stdscr):
             e = rows[sel]
             if e["short"] == SELF:
                 status = "refusing to delete this session's own record"
-            elif confirmed({e["short"]}, "delete %s%s. the transcript stays"
+            elif e["dup"] and confirmed(
+                    {e["uid"]}, "drop the %s copy of %s. the %s one stays"
+                    % (("parked", e["short"], "live") if e["parked"]
+                       else ("live", e["short"], "parked"))):
+                err = remove(e)
+                status = err or "dropped the %s copy of %s" % (
+                    "parked" if e["parked"] else "live", e["short"])
+                entries = load()
+            elif e["dup"]:
+                pass
+            elif confirmed({e["uid"]}, "delete %s%s. the transcript stays"
                            % (e["short"], " while it is %s" % e["state"]
                               if e["live"] else "")):
                 err = remove(e)
@@ -773,10 +814,19 @@ def run(stdscr):
             sel = 0
         elif c == ord(" ") and rows:
             e = rows[sel]
-            if e["short"] == SELF and not e["parked"]:
+            live = next((x for x in entries if x["dup"] and not x["parked"]
+                         and x["short"] == e["short"]), None)
+            if e["dup"] and live:
+                if confirmed({live["uid"]}, "put the parked copy of %s back. "
+                             "the live copy is dropped" % e["short"]):
+                    err = restore(e["short"])
+                    status = err or "put %s back" % e["short"]
+                    entries = load()
+                    want = "live/" + e["short"]
+            elif e["short"] == SELF and not e["parked"]:
                 status = "refusing to park this session's own record"
             elif (not e["live"] or e["parked"] or confirmed(
-                    {e["short"]}, "park %s while it is %s" % (e["short"], e["state"]))):
+                    {e["uid"]}, "park %s while it is %s" % (e["short"], e["state"]))):
                 err = toggle(e)
                 if not err and not e["parked"]:
                     err = recheck([e["short"]])
@@ -785,21 +835,23 @@ def run(stdscr):
                 entries = load()
         elif c == ord("A"):
             # Shown means on screen, so a folded group is left alone.
-            todo = [e for e in rows if not e.get("kind")
+            # A doubled row has its own fix, so the bulk keys pass it by.
+            todo = [e for e in rows if not e.get("kind") and not e.get("dup")
                     and not e["parked"] and e["short"] != SELF]
             if not todo:
                 status = "nothing to park"
-            elif confirmed({e["short"] for e in todo},
+            elif confirmed({e["uid"] for e in todo},
                            "park these %d sessions" % len(todo)):
                 done = [e["short"] for e in todo if toggle(e) is None]
                 err = recheck(done)
                 entries = load()
                 status = err or "parked %d" % len(done)
         elif c == ord("U"):
-            todo = [e for e in rows if not e.get("kind") and e["parked"]]
+            todo = [e for e in rows if not e.get("kind") and not e.get("dup")
+                    and e["parked"]]
             if not todo:
                 status = "nothing parked"
-            elif confirmed({e["short"] for e in todo},
+            elif confirmed({e["uid"] for e in todo},
                            "unpark these %d sessions" % len(todo)):
                 for e in todo:
                     toggle(e)
