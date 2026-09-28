@@ -57,6 +57,9 @@ STATE_COLOR = {
 }
 # The highlight grey, and what stands in for it without 256 colours.
 SEL_BG = 237
+# While a filter is on, both bars turn this colour so the eye finds the
+# header that says how to clear it. Yellow stands in without 256 colours.
+FILTER_BG = 208
 
 # One source for the ? panel and for --keys, so a new binding is written
 # down once. (group, ((keys, what), ...)).
@@ -475,6 +478,14 @@ def run(stdscr):
     def rich():
         return curses.has_colors() and curses.COLORS >= 256
 
+    def bar_attr(filtering):
+        if not filtering:
+            return curses.A_REVERSE
+        if not curses.has_colors():
+            return curses.A_REVERSE | curses.A_BOLD
+        bg = FILTER_BG if rich() else curses.COLOR_YELLOW
+        return pair(curses.COLOR_BLACK, bg) | curses.A_BOLD
+
     def plain_attr(item, selected):
         """Plain cells. Parked rows are dim until the highlight lifts them."""
         base = curses.A_BOLD if item.get("short") == SELF else 0
@@ -563,12 +574,16 @@ def run(stdscr):
 
         nvis = sum(1 for e in entries if not e["parked"])
         npark = len(entries) - nvis
-        head = " claude-park   %d visible   %d parked" % (nvis, npark)
+        if filt:
+            nshown = len(view())
+            head = (" claude-park   filter: %s   esc to clear   %d of %d shown"
+                    % (filt, nshown, len(entries)))
+        else:
+            head = " claude-park   %d visible   %d parked" % (nvis, npark)
         if grouped:
             head += "   by cwd"
-        if filt:
-            head += "   filter:%s" % filt
-        stdscr.addstr(0, 0, pad(head, w - 1), curses.A_REVERSE)
+        bar_a = bar_attr(bool(filt))
+        stdscr.addstr(0, 0, pad(head, w - 1), bar_a)
 
         name_w = max(12, int((w - 36) * 0.5))
         cwd_w = max(10, w - 36 - name_w)
@@ -635,7 +650,7 @@ def run(stdscr):
                 "^s group   ^x delete   f filter   h keys   q quit ")
         if len(keys) > w - 1:
             keys = " \u2191\u2193 move  space park  ^s group  ^x delete  h keys  q quit "
-        stdscr.addstr(h - 1, 0, pad(keys, w - 1), curses.A_REVERSE)
+        stdscr.addstr(h - 1, 0, pad(keys, w - 1), bar_a)
         stdscr.refresh()
 
         c = read_key(stdscr)
@@ -719,7 +734,7 @@ def run(stdscr):
                     save_order(entries)
         elif c == ord("f"):
             curses.echo()
-            stdscr.addstr(h - 1, 0, " filter: ".ljust(w - 1), curses.A_REVERSE)
+            stdscr.addstr(h - 1, 0, " filter: ".ljust(w - 1), bar_attr(True))
             stdscr.move(h - 1, 9)
             try:
                 filt = stdscr.getstr().decode("utf-8", "replace").strip()
