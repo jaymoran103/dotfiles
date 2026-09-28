@@ -14,6 +14,9 @@ recency. Enter on a title row folds or unfolds that group, or that
 section in the recency view. - folds every one and + unfolds them. The
 view and the folded rows are kept in the same file.
 
+A risky key does nothing on its first press. It turns the rows it would
+touch red and says what a second press does. Any other key cancels.
+
 Ctrl+X deletes a job record outright. That store is all it removes, so the
 transcript and `claude --resume` survive a delete as they do a park.
 
@@ -73,6 +76,8 @@ HELP = (
               ("A", "park every shown row"),
               ("U", "unpark every shown row"))),
     ("delete", (("^x", "drop the job record, keep the transcript"),)),
+    ("confirm", (("twice", "^x, A, U, and space on a live row"),
+                 ("", "any other key cancels"))),
     ("find", (("f", "filter on name, id, cwd or state"),
               ("esc", "clear the filter"))),
     ("other", (("r", "reload from disk"),
@@ -553,11 +558,15 @@ def run(stdscr):
                 if f in e["name"].lower() or f in e["short"]
                 or f in e["cwd"].lower() or f in e["state"]]
 
-    def ask(win, prompt):
-        h, w = win.getmaxyx()
-        win.addstr(h - 1, 0, pad(prompt, w - 1), curses.A_REVERSE)
-        win.refresh()
-        return win.getch()
+    # A risky key arms on its first press and runs on the second. armed
+    # holds the key and the ids it would touch, so a second press only
+    # counts while it still means the same rows.
+    armed = None
+
+    def warn_attr():
+        if not curses.has_colors():
+            return curses.A_REVERSE | curses.A_BOLD
+        return pair(curses.COLOR_BLACK, curses.COLOR_RED) | curses.A_BOLD
 
     while True:
         layout = grouped_rows if grouped else section_rows
@@ -614,6 +623,8 @@ def run(stdscr):
                 continue
             mark = "·" if e["parked"] else "●"
             plain_a, state_a, blip_a = row_attrs(e, i == sel)
+            if armed and e["short"] in armed["ids"]:
+                plain_a = state_a = warn_attr()
             cells = (
                 (" %s %-8s " % (mark, e["short"]), plain_a),
                 ("%-8s" % e["state"][:8], state_a),
@@ -637,7 +648,9 @@ def run(stdscr):
             stdscr.addstr(y, 0, pad("", w - 1))
             y += 1
 
-        stdscr.addstr(h - 2, 1, pad(status, w - 2), curses.A_DIM)
+        stdscr.addstr(h - 2, 1, pad(status, w - 2),
+                      (pair(curses.COLOR_RED, -1) | curses.A_BOLD) if armed
+                      else curses.A_DIM)
         x = w - 2 - len(RAINBOW)
         if x > len(status) + 2:
             for name in RAINBOW:
@@ -655,7 +668,26 @@ def run(stdscr):
         c = read_key(stdscr)
         if c in (ord("h"), ord("?")):
             c = help_panel(stdscr)
-        if c == ord("q"):
+        prev, armed = armed, None
+        if prev and c != -1:
+            # Whatever this key does, the warning no longer holds.
+            status = "cancelled"
+
+        def confirmed(ids, what):
+            """True on the second press. On the first, arm and say why."""
+            nonlocal armed, status
+            if prev and prev["key"] == c and prev["ids"] == ids:
+                return True
+            armed = {"key": c, "ids": ids}
+            status = "%s again to %s. any other key cancels" % (
+                {CTRL_X: "^x", ord(" "): "space"}.get(c, chr(c)), what)
+            return False
+
+        if c == -1:
+            armed = prev
+        elif c == 27 and prev:
+            pass
+        elif c == ord("q"):
             return
         elif c == 27:
             filt, sel, status = "", 0, "filter cleared"
@@ -719,11 +751,9 @@ def run(stdscr):
             e = rows[sel]
             if e["short"] == SELF:
                 status = "refusing to delete this session's own record"
-            elif ask(stdscr, " delete %s%s? the transcript stays. y/N "
-                     % (e["short"], " while it is %s" % e["state"]
-                        if e["live"] else "")) not in (ord("y"), ord("Y")):
-                status = "kept %s" % e["short"]
-            else:
+            elif confirmed({e["short"]}, "delete %s%s. the transcript stays"
+                           % (e["short"], " while it is %s" % e["state"]
+                              if e["live"] else "")):
                 err = remove(e)
                 status = err or "deleted %s" % e["short"]
                 entries = load()
@@ -745,11 +775,8 @@ def run(stdscr):
             e = rows[sel]
             if e["short"] == SELF and not e["parked"]:
                 status = "refusing to park this session's own record"
-            elif e["live"] and not e["parked"] and ask(
-                    stdscr, " %s is %s. Park anyway? y/N " % (e["short"], e["state"])
-            ) not in (ord("y"), ord("Y")):
-                status = "left %s alone" % e["short"]
-            else:
+            elif (not e["live"] or e["parked"] or confirmed(
+                    {e["short"]}, "park %s while it is %s" % (e["short"], e["state"]))):
                 err = toggle(e)
                 if not err and not e["parked"]:
                     err = recheck([e["short"]])
@@ -762,8 +789,8 @@ def run(stdscr):
                     and not e["parked"] and e["short"] != SELF]
             if not todo:
                 status = "nothing to park"
-            elif ask(stdscr, " Park %d sessions? y/N " % len(todo)) in (
-                    ord("y"), ord("Y")):
+            elif confirmed({e["short"] for e in todo},
+                           "park these %d sessions" % len(todo)):
                 done = [e["short"] for e in todo if toggle(e) is None]
                 err = recheck(done)
                 entries = load()
@@ -772,8 +799,8 @@ def run(stdscr):
             todo = [e for e in rows if not e.get("kind") and e["parked"]]
             if not todo:
                 status = "nothing parked"
-            elif ask(stdscr, " Unpark %d sessions? y/N " % len(todo)) in (
-                    ord("y"), ord("Y")):
+            elif confirmed({e["short"] for e in todo},
+                           "unpark these %d sessions" % len(todo)):
                 for e in todo:
                     toggle(e)
                 entries = load()
