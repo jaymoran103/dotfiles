@@ -57,9 +57,8 @@ STATE_COLOR = {
 }
 # The highlight grey, and what stands in for it without 256 colours.
 SEL_BG = 237
-# While a filter is on, both bars turn this colour so the eye finds the
-# header that says how to clear it. Yellow stands in without 256 colours.
-FILTER_BG = 208
+# While a filter is on, both bars turn green, or red when nothing
+# matches, so the eye finds the header that says how to clear it.
 
 # One source for the ? panel and for --keys, so a new binding is written
 # down once. (group, ((keys, what), ...)).
@@ -478,12 +477,12 @@ def run(stdscr):
     def rich():
         return curses.has_colors() and curses.COLORS >= 256
 
-    def bar_attr(filtering):
+    def bar_attr(filtering, matched=True):
         if not filtering:
             return curses.A_REVERSE
         if not curses.has_colors():
             return curses.A_REVERSE | curses.A_BOLD
-        bg = FILTER_BG if rich() else curses.COLOR_YELLOW
+        bg = curses.COLOR_GREEN if matched else curses.COLOR_RED
         return pair(curses.COLOR_BLACK, bg) | curses.A_BOLD
 
     def plain_attr(item, selected):
@@ -574,15 +573,15 @@ def run(stdscr):
 
         nvis = sum(1 for e in entries if not e["parked"])
         npark = len(entries) - nvis
+        nshown = len(view())
         if filt:
-            nshown = len(view())
             head = (" claude-park   filter: %s   esc to clear   %d of %d shown"
                     % (filt, nshown, len(entries)))
         else:
             head = " claude-park   %d visible   %d parked" % (nvis, npark)
         if grouped:
             head += "   by cwd"
-        bar_a = bar_attr(bool(filt))
+        bar_a = bar_attr(bool(filt), nshown > 0)
         stdscr.addstr(0, 0, pad(head, w - 1), bar_a)
 
         name_w = max(12, int((w - 36) * 0.5))
