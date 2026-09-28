@@ -9,7 +9,11 @@ The transcript in ~/.claude/projects is never touched, so
 Shift+Up / Shift+Down reorder the highlighted row. The order is kept in
 ~/.claude/claude-park-order.json and survives restarts.
 
-x deletes a job record outright. That store is all it removes, so the
+Ctrl+S groups each section by cwd, as `claude agents` does, and back to
+recency. Enter on a group's title row folds or unfolds it. The view and
+the folded groups are kept in the same file.
+
+Ctrl+X deletes a job record outright. That store is all it removes, so the
 transcript and `claude --resume` survive a delete as they do a park.
 
 h opens the key panel. Keys pressed there run as if typed on the list,
@@ -56,11 +60,13 @@ SEL_BG = 237
 HELP = (
     ("move", (("\u2191 \u2193    j k", "highlight a row"),
               ("g    G", "first row, last row"))),
-    ("order", (("\u21e7\u2191 \u21e7\u2193   J K", "move the row in its section"),)),
+    ("order", (("\u21e7\u2191 \u21e7\u2193   J K", "move the row in its section or group"),)),
+    ("group", (("^s", "group by cwd, or back to recency"),
+               ("enter", "fold or unfold the group"))),
     ("park", (("space", "park or unpark the row"),
               ("A", "park every shown row"),
               ("U", "unpark every shown row"))),
-    ("delete", (("x", "drop the job record, keep the transcript"),)),
+    ("delete", (("^x", "drop the job record, keep the transcript"),)),
     ("find", (("f", "filter on name, id, cwd or state"),
               ("esc", "clear the filter"))),
     ("other", (("r", "reload from disk"),
@@ -147,26 +153,73 @@ def ago(ts):
     return "%dw" % int(d // 604800)
 
 
-def load_order():
-    """Map job id -> hand-placed rank. Missing file means no hand order."""
+CTRL_S, CTRL_X = 19, 24
+
+
+def read_saved():
+    """The saved order and view. Missing or broken file means neither."""
     try:
         with open(ORDER) as fh:
-            ids = json.load(fh).get("order") or []
+            d = json.load(fh)
     except Exception:
         return {}
+    return d if isinstance(d, dict) else {}
+
+
+def write_saved(**changes):
+    """Rewrite the file with changes on top, keeping every other key."""
+    d = read_saved()
+    d.update(changes)
+    tmp = ORDER + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(d, fh)
+        os.replace(tmp, ORDER)
+    except Exception as exc:
+        return "could not save %s: %s" % ("/".join(changes), exc)
+    return None
+
+
+def load_order():
+    """Map job id -> hand-placed rank. No saved order means no hand order."""
+    ids = read_saved().get("order") or []
     return {k: i for i, k in enumerate(ids) if isinstance(k, str)}
 
 
 def save_order(entries):
     """Snapshot the whole list. Ids that no longer exist are dropped."""
-    tmp = ORDER + ".tmp"
-    try:
-        with open(tmp, "w") as fh:
-            json.dump({"order": [e["short"] for e in entries]}, fh)
-        os.replace(tmp, ORDER)
-    except Exception as exc:
-        return "could not save order: %s" % exc
-    return None
+    return write_saved(order=[e["short"] for e in entries])
+
+
+def tilde(p):
+    return "~" + p[len(HOME):] if p.startswith(HOME) else p
+
+
+def grouped_rows(shown, folded):
+    """Each section split by cwd, a title row above every group.
+
+    Groups keep the order their first session has in the list, and the
+    sessions in a group keep theirs, so hand order and recency both still
+    count. A folded group keeps its title row and hides the rest.
+    """
+    out = []
+    for parked in (False, True):
+        order, by = [], {}
+        for e in shown:
+            if e["parked"] != parked:
+                continue
+            if e["cwd"] not in by:
+                by[e["cwd"]] = []
+                order.append(e["cwd"])
+            by[e["cwd"]].append(e)
+        for cwd in order:
+            key = ("parked:" if parked else "visible:") + cwd
+            is_open = key not in folded
+            out.append({"kind": "group", "key": key, "parked": parked,
+                        "cwd": cwd, "n": len(by[cwd]), "open": is_open})
+            if is_open:
+                out.extend(by[cwd])
+    return out
 
 
 def load():
@@ -218,6 +271,11 @@ def move(entries, rows, sel, delta):
     if tgt < 0 or tgt >= len(rows):
         return sel, "already at the %s" % ("top" if delta < 0 else "bottom")
     a, b = rows[sel], rows[tgt]
+    if a.get("kind"):
+        return sel, "a group row does not move. enter folds it"
+    if b.get("kind"):
+        # Title rows sit between groups, so this is the edge of one.
+        return sel, "reorder stays in its group"
     if a["parked"] != b["parked"]:
         return sel, "reorder stays in one section. space parks or unparks"
     i, j = entries.index(a), entries.index(b)
@@ -392,12 +450,9 @@ def run(stdscr):
     def rich():
         return curses.has_colors() and curses.COLORS >= 256
 
-    def row_attrs(e, selected):
-        """Attributes for the plain cells, the state word and the name."""
-        base = curses.A_BOLD if e["short"] == SELF else 0
-        if e["parked"]:
-            plain_a = base | curses.A_DIM
-            return (plain_a | (curses.A_REVERSE if selected else 0),) * 3
+    def plain_attr(item, selected):
+        """Plain cells. Parked rows are dim until the highlight lifts them."""
+        base = curses.A_BOLD if item.get("short") == SELF else 0
         bg = -1
         if selected:
             base |= curses.A_BOLD
@@ -405,22 +460,58 @@ def run(stdscr):
                 bg = SEL_BG
             else:
                 base |= curses.A_REVERSE
-        plain_a = base | pair(-1, bg)
+        elif item["parked"]:
+            base |= curses.A_DIM
+        return base, base | pair(-1, bg)
+
+    def row_attrs(e, selected):
+        """Attributes for plain cells, the state word, the gap and the name.
+
+        A parked row keeps its name plain and shows the session colour as
+        a one-cell blip in the gap before it instead.
+        """
+        base, plain_a = plain_attr(e, selected)
+        col = SESSION_COLOR.get(e["color"])
+        swatch = None
+        if col and curses.has_colors():
+            c = col[1] if col[1] is not None and rich() else col[0]
+            swatch = pair(curses.COLOR_BLACK, c)
+        if e["parked"]:
+            return plain_a, plain_a, swatch or plain_a, plain_a
         sc = STATE_COLOR.get(e["state"])
-        state_a = base | pair(sc, bg) if sc is not None else plain_a
+        state_a = plain_a
+        if sc is not None:
+            state_a = base | pair(sc, SEL_BG if selected and rich() else -1)
         if e["state"] == "working":
             state_a |= curses.A_BOLD
         name_a = plain_a
-        col = SESSION_COLOR.get(e["color"])
-        if col:
-            c = col[1] if col[1] is not None and rich() else col[0]
-            name_a = (base & ~curses.A_REVERSE) | pair(curses.COLOR_BLACK, c)
-        return plain_a, state_a, name_a
+        if swatch:
+            name_a = (base & ~curses.A_REVERSE) | swatch
+        return plain_a, state_a, plain_a, name_a
+
+    # Ctrl+S is XOFF to a terminal left in its default mode, which would
+    # freeze the screen instead of reaching us. Flow control is switched
+    # off for the session, and endwin() puts the terminal back as it was.
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        mode = termios.tcgetattr(fd)
+        mode[0] &= ~termios.IXON
+        termios.tcsetattr(fd, termios.TCSANOW, mode)
+    except Exception:
+        pass
 
     entries = load()
+    saved = read_saved()
+    grouped = bool(saved.get("grouped"))
+    folded = set(k for k in saved.get("folded") or [] if isinstance(k, str))
     sel = 0
+    want = None
     filt = ""
     status = "space parks or unparks   h lists every key"
+
+    def ident(item):
+        return item.get("key") or item["short"]
 
     def view():
         if not filt:
@@ -437,7 +528,11 @@ def run(stdscr):
         return win.getch()
 
     while True:
-        rows = view()
+        rows = grouped_rows(view(), folded) if grouped else list(view())
+        if want is not None:
+            # Keep the highlight on the same row across a regroup.
+            sel = next((i for i, r in enumerate(rows) if ident(r) == want), sel)
+            want = None
         if sel >= len(rows):
             sel = max(0, len(rows) - 1)
         h, w = stdscr.getmaxyx()
@@ -446,6 +541,8 @@ def run(stdscr):
         nvis = sum(1 for e in entries if not e["parked"])
         npark = len(entries) - nvis
         head = " claude-park   %d visible   %d parked" % (nvis, npark)
+        if grouped:
+            head += "   by cwd"
         if filt:
             head += "   filter:%s" % filt
         stdscr.addstr(0, 0, pad(head, w - 1), curses.A_REVERSE)
@@ -469,15 +566,22 @@ def run(stdscr):
                 y += 1
                 if y >= h - 2:
                     break
+            if e.get("kind"):
+                _, a = plain_attr(e, i == sel)
+                label = " %s %s  %d" % ("\u25be" if e["open"] else "\u25b8",
+                                        tilde(e["cwd"]) or "(no cwd)", e["n"])
+                stdscr.addstr(y, 1, pad(label, w - 2), a | curses.A_BOLD)
+                y += 1
+                continue
             mark = "·" if e["parked"] else "●"
-            plain_a, state_a, name_a = row_attrs(e, i == sel)
+            plain_a, state_a, gap_a, name_a = row_attrs(e, i == sel)
             name = fits(e["name"], name_w)
             # Only the name's own letters sit on its colour, so the cell
             # is split into the text and the padding after it.
             cells = (
                 (" %s %-8s " % (mark, e["short"]), plain_a),
                 ("%-8s" % e["state"][:8], state_a),
-                (" ", plain_a),
+                (" ", gap_a),
                 (name, name_a),
                 ("%s %-*s %s" % (" " * (name_w - len(name)), cwd_w,
                                  fits(short_cwd(e["cwd"]), cwd_w),
@@ -501,9 +605,9 @@ def run(stdscr):
         # Only the keys worth a glance. ? carries the full list, so this
         # line stays short enough to survive a narrow terminal intact.
         keys = (" \u2191\u2193 move   \u21e7\u2191\u2193 reorder   space park   "
-                "x delete   f filter   h keys   q quit ")
+                "^s group   ^x delete   f filter   h keys   q quit ")
         if len(keys) > w - 1:
-            keys = " \u2191\u2193 move  space park  x delete  h keys  q quit "
+            keys = " \u2191\u2193 move  space park  ^s group  ^x delete  h keys  q quit "
         stdscr.addstr(h - 1, 0, pad(keys, w - 1), curses.A_REVERSE)
         stdscr.refresh()
 
@@ -529,7 +633,32 @@ def run(stdscr):
         elif c == ord("r"):
             entries = load()
             status = "reloaded"
-        elif c == ord("x") and rows:
+        elif c == CTRL_S:
+            grouped = not grouped
+            if rows:
+                cur = rows[sel]
+                # Leaving the grouped view from a title row lands on the
+                # group's first session.
+                if cur.get("kind"):
+                    cur = next((e for e in view() if e["parked"] == cur["parked"]
+                                and e["cwd"] == cur["cwd"]), cur)
+                want = ident(cur)
+            err = write_saved(grouped=grouped)
+            # Most rows shift at once. Left to itself curses answers that
+            # with a scroll region, so the frame is repainted outright.
+            stdscr.clear()
+            status = err or ("grouped by cwd. enter folds a group"
+                             if grouped else "sorted by recency")
+        elif c in (10, 13, curses.KEY_ENTER) and rows and rows[sel].get("kind"):
+            g = rows[sel]
+            folded ^= {g["key"]}
+            err = write_saved(folded=sorted(folded))
+            stdscr.clear()
+            status = err or "%s %s" % ("unfolded" if g["key"] not in folded
+                                       else "folded", tilde(g["cwd"]))
+        elif c in (CTRL_X, ord(" ")) and rows and rows[sel].get("kind"):
+            status = "that is a group row. enter folds it"
+        elif c == CTRL_X and rows:
             e = rows[sel]
             if e["short"] == SELF:
                 status = "refusing to delete this session's own record"
@@ -543,7 +672,7 @@ def run(stdscr):
                 entries = load()
                 # Prune the stale id, but only from an order the user has
                 # already made. A delete should not pin an unsorted list.
-                if not err and os.path.exists(ORDER):
+                if not err and load_order():
                     save_order(entries)
         elif c == ord("f"):
             curses.echo()
@@ -571,8 +700,9 @@ def run(stdscr):
                     "unparked" if e["parked"] else "parked", e["short"]))
                 entries = load()
         elif c == ord("A"):
-            todo = [e for e in view()
-                    if not e["parked"] and e["short"] != SELF]
+            # Shown means on screen, so a folded group is left alone.
+            todo = [e for e in rows if not e.get("kind")
+                    and not e["parked"] and e["short"] != SELF]
             if not todo:
                 status = "nothing to park"
             elif ask(stdscr, " Park %d sessions? y/N " % len(todo)) in (
@@ -582,7 +712,7 @@ def run(stdscr):
                 entries = load()
                 status = err or "parked %d" % len(done)
         elif c == ord("U"):
-            todo = [e for e in view() if e["parked"]]
+            todo = [e for e in rows if not e.get("kind") and e["parked"]]
             if not todo:
                 status = "nothing parked"
             elif ask(stdscr, " Unpark %d sessions? y/N " % len(todo)) in (
