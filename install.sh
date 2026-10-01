@@ -60,6 +60,7 @@ link_configs() {
   backup_and_link "$DOTFILES/bin/ghostty-theme"     "$HOME/.local/bin/ghostty-theme"
   backup_and_link "$DOTFILES/bin/claude-statusline" "$HOME/.local/bin/claude-statusline"
   backup_and_link "$DOTFILES/bin/icons-batch"       "$HOME/.local/bin/icons-batch"
+  backup_and_link "$DOTFILES/bin/color-pick"        "$HOME/.local/bin/color-pick"
   backup_and_link "$DOTFILES/config/starship.toml"  "$HOME/.config/starship.toml"
   backup_and_link "$DOTFILES/git/gitconfig"         "$HOME/.gitconfig"
   if [[ ! -f "$HOME/.gitconfig.local" ]]; then
