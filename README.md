@@ -11,6 +11,7 @@ Portable zsh + Ghostty + starship setup for macOS and Linux.
 | `config/ghostty/config` | `~/.config/ghostty/config` | Terminal: SF Mono, block cursor, `theme =` names a file in `themes/` |
 | `config/ghostty/themes/` | `~/.config/ghostty/themes` | Colour schemes: ayu, gruvbox, jellybeans, srcery |
 | `bin/ghostty-theme` | `~/.local/bin/ghostty-theme` | Theme picker — see below |
+| `bin/ghostty-theme-edit` | `~/.local/bin/ghostty-theme-edit` | Theme editor — see below |
 | `bin/icons-batch` | `~/.local/bin/icons-batch` | One DiceBear blob PNG per seed, into `icons-<timestamp>/` |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
@@ -89,3 +90,22 @@ the `theme =` line in `config`; other already-open Ghostty windows pick it up on
 
 To add a theme, drop a Ghostty colour-scheme file into `config/ghostty/themes/`.
 `ghostty +list-themes` shows the bundled ones worth copying from.
+
+## Editing themes
+
+```sh
+ghostty-theme -e              # theme list: open one, or n for a new one
+ghostty-theme -e theme-ayu    # open one straight away (a new name starts a copy)
+```
+
+Three levels: the theme list, the theme's elements in groups (base,
+cursor, selection, normal and bright palette), and a picker for one
+colour. The picker has H S L and R G B sliders drawn as gradients, `#`
+for a hex value, and a `P` row that steps through the theme's other
+colours. Enter opens the picker, and enter closes it with the change
+kept. Esc closes it and undoes the change.
+
+Every change repaints the window as you make it. `s` saves into
+`config/ghostty/themes/`, keeping any lines the editor does not manage,
+`S` saves as a new name and `a` saves and applies through `ghostty-theme`.
+Leaving puts the config's theme back. Needs only `python3`.

@@ -58,6 +58,7 @@ link_configs() {
   backup_and_link "$DOTFILES/config/ghostty/themes" "$HOME/.config/ghostty/themes"
   # ~/.local/bin is already put on PATH by zsh/zshrc.
   backup_and_link "$DOTFILES/bin/ghostty-theme"     "$HOME/.local/bin/ghostty-theme"
+  backup_and_link "$DOTFILES/bin/ghostty-theme-edit" "$HOME/.local/bin/ghostty-theme-edit"
   backup_and_link "$DOTFILES/bin/claude-statusline" "$HOME/.local/bin/claude-statusline"
   backup_and_link "$DOTFILES/bin/icons-batch"       "$HOME/.local/bin/icons-batch"
   backup_and_link "$DOTFILES/config/starship.toml"  "$HOME/.config/starship.toml"
