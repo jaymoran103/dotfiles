@@ -59,9 +59,14 @@ link_configs() {
   # ~/.local/bin is already put on PATH by zsh/zshrc.
   backup_and_link "$DOTFILES/bin/ghostty-theme"     "$HOME/.local/bin/ghostty-theme"
   backup_and_link "$DOTFILES/bin/ghostty-theme-edit" "$HOME/.local/bin/ghostty-theme-edit"
+  backup_and_link "$DOTFILES/bin/claude-park"       "$HOME/.local/bin/claude-park"
   backup_and_link "$DOTFILES/bin/claude-statusline" "$HOME/.local/bin/claude-statusline"
   backup_and_link "$DOTFILES/bin/icons-batch"       "$HOME/.local/bin/icons-batch"
   backup_and_link "$DOTFILES/bin/color-pick"        "$HOME/.local/bin/color-pick"
+  backup_and_link "$DOTFILES/bin/forgej"            "$HOME/.local/bin/forgej"
+  # Claude's allow rule runs the launcher from this path.
+  mkdir -p "$HOME/forge-data/bin"
+  backup_and_link "$DOTFILES/bin/forgej"            "$HOME/forge-data/bin/forgej"
   backup_and_link "$DOTFILES/config/starship.toml"  "$HOME/.config/starship.toml"
   backup_and_link "$DOTFILES/git/gitconfig"         "$HOME/.gitconfig"
   if [[ ! -f "$HOME/.gitconfig.local" ]]; then

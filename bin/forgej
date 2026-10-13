@@ -1,0 +1,50 @@
+#!/bin/sh
+# Manage the local forgeJ server for ~/Arcade.
+# forgeJ runs on :3001 (ssh :2223) with data in ~/forge-data/forgeJ.
+set -eu
+ROOT="$HOME/forge-data"
+SRC="$HOME/ESPO/forgeJ"
+DATA="$ROOT/forgeJ"
+LOG="$ROOT/forgeJ.log"
+PIDF="$ROOT/forgeJ.pid"
+WRAP="$ROOT/bin/gitwrap"
+PORT="${FORGEJ_PORT:-3001}"
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+
+case "${1:-status}" in
+  start)
+    if running; then echo "running pid $(cat "$PIDF") on :$PORT"; exit 0; fi
+    mkdir -p "$DATA" "$WRAP"
+    # Apple git loads osxkeychain even with GIT_CONFIG_SYSTEM unset, so the
+    # forge's git calls go through a wrapper that turns the helper off.
+    printf '#!/bin/sh\nexec /usr/bin/git -c credential.helper= "$@"\n' >"$WRAP/git"
+    chmod +x "$WRAP/git"
+    cd "$SRC"
+    PATH="$WRAP:$PATH" FORGE_KEYCHAIN=0 FORGE_DATA="$DATA" \
+      PORT="$PORT" FORGE_SSH_PORT=2223 \
+      nohup bun run src/main.ts >"$LOG" 2>&1 &
+    echo $! >"$PIDF"
+    sleep 3
+    if running; then echo "started pid $(cat "$PIDF") on :$PORT"; else echo "failed"; tail -20 "$LOG"; exit 1; fi
+    ;;
+  stop)
+    if running; then kill "$(cat "$PIDF")"; rm -f "$PIDF"; echo stopped; else echo "not running"; fi
+    ;;
+  stop-legacy)
+    # The upstream forge from ~/ESPO/forge on :3000, if it is still up.
+    for pid in $(lsof -tiTCP:3000 -sTCP:LISTEN 2>/dev/null); do
+      cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+      if [ "$cwd" = "$HOME/ESPO/forge" ]; then kill "$pid"; echo "stopped legacy pid $pid"; fi
+    done
+    ;;
+  status)
+    if running; then echo "running pid $(cat "$PIDF") on :$PORT"; else echo "not running"; fi
+    ;;
+  log)
+    tail -"${2:-40}" "$LOG"
+    ;;
+  *)
+    echo "usage: forgej start|stop|stop-legacy|status|log [n]"; exit 2
+    ;;
+esac
