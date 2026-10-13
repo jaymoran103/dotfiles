@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""palette-pick — pick two or three base hues and a theme, get a palette.
+"""palette-pick — pick two or three families of colour, get a palette.
 
   palette-pick [options]
 
@@ -7,8 +7,9 @@
       --theme NAME    start from this theme (see --themes)
       --hues LIST     start hues, 2 or 3, as degrees or hex: 210,160,95
       --harmony NAME  how shuffles space the hues (see --themes)
-  -n, --steps N       gradient steps, 2 to 16 (default 6)
-  -f, --format FMT    json (the default), hex (the gradient, one a line) or css
+      --members N     colours per family, 1 to 5 (default 3)
+  -n, --steps N       steps in the JSON gradient, 2 to 16 (default 6)
+  -f, --format FMT    json (the default), hex (a family a line) or css
   -o, --out FILE      also write the palette as JSON on every change
   -x, --xterm         snap every colour to the xterm-256 colour a TUI draws
       --print         print the palette for the options given, no picker
@@ -20,24 +21,26 @@
 Enter prints the palette and exits 0. Esc or q prints nothing and exits 1.
 A usage error exits 2. With no --theme or --hues it opens on your last pick.
 
-Each base starts neutral: its hue at one plain OKLCH lightness and
-chroma, so every base looks equally light and equally strong. Each
-hue row shows its neutral colour first, then its base as the sliders
-treat it, then the variants around that base.
+The basics come first. Each of the 2 or 3 base hues heads a family: the
+base in the middle and its siblings either side, at the same lightness
+and chroma, turned a few degrees apart in hue. Siblings lean toward the
+neighbouring family, so the whole palette reads as one progression with
+clear divisions. The palette row shows it in order. The check under it
+says whether siblings tell apart and families sit further apart still.
+A base starts at one plain OKLCH lightness and chroma. # on its row takes
+a hex instead: its hue, lightness and chroma.
 
-Every slider is an effect on top of neutral, and 0 means none. With all
-of them at 0 the bases are the neutral hues. light and chroma shift the
-bases. stagger lifts the first base and drops the last. spread, drift and
-fade open the variants around each base: lightness, hue turn, chroma loss
-toward the ends. tint mixes toward a colour. lift and cap pull the black
-and white points in. The gradient runs through the bases.
+The effects come on top, and 0 is always none. light and chroma shift
+every base. stagger lifts the first family and drops the last. spread,
+drift and fade shape the shades of each base. tint mixes toward a colour.
+lift and cap pull the black and white points in.
 
 Space shuffles the hues within the harmony and S shuffles everything.
 b steps back through shuffles. x on a hue row keeps it through shuffles.
-0 sets the slider under the cursor to 0. N sets them all to 0: neutral.
+0 sets the effect under the cursor to 0. N sets every effect to 0.
 t and m step the theme and the harmony, and 2 or 3 sets the hue count.
-< and > turn every hue at once. + and - change the gradient steps.
-# types a hex: on a hue row it takes that colour's hue, on the tint row
+< and > turn every hue at once. + and - change the family size.
+# types a hex: on a hue row it sets that family's base, on the tint row
 the tint itself. w saves the knobs as a theme of your own, in
 ~/.config/palette-pick/themes.json. c copies the output, r resets.
 """
@@ -66,7 +69,7 @@ LAST = os.path.join(STATE, "palette-pick", "last.json")
 USER_THEMES = os.path.join(CONFIG, "palette-pick", "themes.json")
 
 BOLD, DIM, REV, RED = "\x1b[1m", "\x1b[2m", "\x1b[7m", "\x1b[31m"
-MAX_W, MIN_W, MIN_H = 76, 56, 27
+MAX_W, MIN_W, MIN_H = 76, 56, 30
 VARIANTS = 9
 CLOSE = 3.0          # steps nearer than this, in OKLab ΔE×100, read as one colour
 
@@ -81,6 +84,13 @@ CLOSE = 3.0          # steps nearer than this, in OKLab ΔE×100, read as one co
 # move the black and white points in.
 
 NEUTRAL_L, NEUTRAL_C = 70, 14
+
+# The basics. Each base hue heads a family: the base and its siblings, the
+# same lightness and chroma turned apart in hue, ordered so each family
+# leans toward the next. SIBLING is how different neighbouring siblings
+# look, in ΔE: a grey-ish family turns further in hue than a vivid one to
+# look as different. Families stay clearly apart, siblings stay related.
+MEMBERS, SIBLING = 3, 6
 NEUTRAL_SPREAD = 14     # neutral variants: plain shades and tints, this far in L each way
 
 THEMES = {
@@ -98,8 +108,8 @@ THEMES = {
 # Hue offsets in degrees from a root. A shuffle picks a root, a harmony
 # when none is set, a direction, and a few degrees of jitter.
 HARMONIES = {
-    2: {"near": (0, 50), "wide": (0, 100), "split": (0, 150), "opposite": (0, 180)},
-    3: {"analog": (0, 35, 70), "fan": (0, 60, 120), "triad": (0, 120, 240), "split": (0, 150, 210)},
+    2: {"wide": (0, 100), "split": (0, 150), "opposite": (0, 180)},
+    3: {"fan": (0, 75, 150), "triad": (0, 120, 240), "split": (0, 150, 210)},
 }
 JITTER = 6
 
@@ -108,6 +118,11 @@ JITTER = 6
 KNOBS = (("L", "light", -45, 25, 0), ("C", "chroma", -14, 23, 0), ("stagger", "stagger", -30, 30, 0),
          ("spread", "spread", -NEUTRAL_SPREAD, 26, 1), ("drift", "drift", -45, 45, 1), ("fade", "fade", 0, 100, 1),
          ("mix", "tint", 0, 60, 0), ("lift", "lift", 0, 120, -1), ("cap", "cap", 0, 120, 1))
+
+# The basics' rows: attribute, row label, lowest, highest, unit, what it does.
+BASICS = (("members", "size", 1, 5, "", "colours in each family: the base and its siblings"),
+          ("sibling", "siblings", 0, 16, "", "how different neighbouring siblings look, in ΔE"))
+K0 = 3 + len(BASICS)          # the first effect's row
 
 KNOB_HELP = {
     "L": "lighter or darker bases", "C": "stronger or greyer bases",
@@ -127,25 +142,67 @@ def slot(lo, hi, v, w):
     return mid + round(v * (w - 1 - mid) / hi) if v >= 0 else mid - round(v * mid / lo)
 
 
+def base_lc(p, i, k):
+    """Base i's lightness and chroma once the effects are on."""
+    L, C = p.lc[i]
+    return L + k["L"] + k["stagger"] * (0.5 - i / (len(p.hues) - 1)), C + k["C"]
+
+
 def anchors(p):
     """Each base as (L, C, h), before tint and levels."""
-    k, n = p.knobs, len(p.hues)
-    return [(NEUTRAL_L + k["L"] + k["stagger"] * (0.5 - i / (n - 1)), NEUTRAL_C + k["C"], p.hues[i])
-            for i in range(n)]
+    return [base_lc(p, i, p.knobs) + (p.hues[i],) for i in range(len(p.hues))]
 
 
 def variant(p, i, t, knobs=None):
     """Base i moved t along its ramp, from −1 (dark end) to 1 (light end)."""
     k = knobs or p.knobs
-    n = len(p.hues)
-    L = NEUTRAL_L + k["L"] + k["stagger"] * (0.5 - i / (n - 1)) + (NEUTRAL_SPREAD + k["spread"]) * t
-    C = (NEUTRAL_C + k["C"]) * (1 - k["fade"] / 100 * abs(t))
+    L, C = base_lc(p, i, k)
+    L += (NEUTRAL_SPREAD + k["spread"]) * t
+    C *= 1 - k["fade"] / 100 * abs(t)
     return paint(L, C, p.hues[i] + k["drift"] * t, k, p.snap)
 
 
 def neutral(p, i):
     """Base i with no effects at all."""
-    return paint(NEUTRAL_L, NEUTRAL_C, p.hues[i], THEMES["neutral"], p.snap)
+    return paint(*p.lc[i], p.hues[i], THEMES["neutral"], p.snap)
+
+
+def heading(hues, i):
+    """+1 or −1: which way round the wheel the palette runs at hue i."""
+    a, b = (hues[i], hues[i + 1]) if i + 1 < len(hues) else (hues[i - 1], hues[i])
+    return 1 if (b - a) % 360 < 180 else -1
+
+
+def families(p):
+    """Each base and its siblings, ordered along the palette's direction."""
+    k, m = p.knobs, p.members
+    out = []
+    for i, h in enumerate(p.hues):
+        L, C = base_lc(p, i, k)
+        # The outermost sibling goes at most a quarter of the way to the
+        # nearest family, so families stay divided whatever the spacing.
+        gaps = [abs((p.hues[j] - h + 180) % 360 - 180) for j in (i - 1, i + 1) if 0 <= j < len(p.hues)]
+        reach = min(gaps) / 4 / max(1, (m - 1) / 2)
+        turn = heading(p.hues, i) * min(sibling_turn(p.sibling, C), reach)
+        out.append([paint(L, C, h + turn * (j - (m - 1) / 2), k) for j in range(m)])
+    if p.snap:
+        flat = snap_apart([c for f in out for c in f])
+        out = [flat[i * m:(i + 1) * m] for i in range(len(out))]
+    return out
+
+
+def sibling_turn(target, C):
+    """Degrees of hue that move a colour of chroma C by target ΔE."""
+    return math.degrees(2 * math.asin(min(1, target / (2 * max(C, 1))))) if target else 0
+
+
+def judge(fams):
+    """How the families read: (siblings' nearest ΔE, families' nearest ΔE, good).
+    Good: siblings tell apart, and families sit further apart than siblings."""
+    sib = [delta(a, b) for f in fams for a, b in zip(f, f[1:])]
+    cross = min(delta(a, b) for i, f in enumerate(fams) for g in fams[i + 1:] for a in f for b in g)
+    near, far = (min(sib), max(sib)) if sib else (99, 0)
+    return near, cross, near >= CLOSE and cross >= max(2 * CLOSE, 1.5 * far)
 
 
 def gradient(p):
@@ -323,6 +380,8 @@ class Palette:
     def __init__(self, hues, theme, harmony, steps, snap, knobs=None, themes=None):
         self.themes = themes or all_themes()
         self.hues = [h % 360 for h in hues]
+        self.lc = [[NEUTRAL_L, NEUTRAL_C] for _ in self.hues]
+        self.members, self.sibling = MEMBERS, SIBLING
         self.theme = theme
         self.knobs = dict(knobs or self.themes[theme])
         self.harmony = harmony
@@ -331,12 +390,14 @@ class Palette:
         self.locks = set()
 
     def state(self):
-        return dict(hues=list(self.hues), theme=self.theme, harmony=self.harmony,
-                    knobs=dict(self.knobs), steps=self.steps, locks=set(self.locks))
+        return dict(hues=list(self.hues), lc=[list(x) for x in self.lc], theme=self.theme,
+                    harmony=self.harmony, knobs=dict(self.knobs), steps=self.steps,
+                    members=self.members, sibling=self.sibling, locks=set(self.locks))
 
     def restore(self, s):
         for k, v in s.items():
-            setattr(self, k, list(v) if k == "hues" else dict(v) if k == "knobs" else set(v) if k == "locks" else v)
+            setattr(self, k, list(v) if k == "hues" else [list(x) for x in v] if k == "lc" else
+                    dict(v) if k == "knobs" else set(v) if k == "locks" else v)
 
     @property
     def tweaked(self):
@@ -352,20 +413,25 @@ class Palette:
             self.harmony = "any"
         if n == 3:
             self.hues.append((self.hues[-1] + self.hues[-1] - self.hues[0]) % 360)
+            self.lc.append([NEUTRAL_L, NEUTRAL_C])
         else:
             self.hues.pop()
+            self.lc.pop()
             self.locks.discard(2)
 
     def shuffle(self, rng, tries=40):
-        """A new set of hues. Sets whose gradient steps blur are passed over,
-        so what a shuffle lands on is one the rules call good."""
+        """A new set of hues. Sets whose families blur, or whose siblings do,
+        are passed over, so what a shuffle lands on is one the rules call good."""
         best = None
+        for i in range(len(self.hues)):
+            if i not in self.locks:
+                self.lc[i] = [NEUTRAL_L, NEUTRAL_C]
         for _ in range(tries):
             name = self.shuffle_once(rng)
-            grad = gradient(self)
-            score = min(delta(a, b) for a, b in zip(grad, grad[1:]))
-            if score >= CLOSE:
+            near, cross, good = judge(families(self))
+            if good:
                 return name
+            score = min(near / CLOSE, cross / (2 * CLOSE))
             if not best or score > best[0]:
                 best = (score, name, list(self.hues))
         self.hues = best[2]
@@ -392,10 +458,20 @@ class Palette:
     def output(self):
         grad = gradient(self)
         bases = [variant(self, i, 0) for i in range(len(self.hues))]
+        fams = families(self)
+        near, cross, good = judge(fams)
         return {
+            "families": fams,
+            "palette": [c for f in fams for c in f],
+            "members": self.members,
+            "sibling": self.sibling,
+            "min_sibling": round(near, 1),
+            "min_family": round(cross, 1),
+            "clear": good,
             "theme": self.theme + ("*" if self.tweaked else ""),
             "harmony": self.harmony,
             "hues": list(self.hues),
+            "lc": [list(x) for x in self.lc],
             "knobs": dict(self.knobs),
             "xterm": self.snap,
             "bases": bases,
@@ -410,9 +486,10 @@ class Palette:
     def formatted(self, how):
         o = self.output()
         if how == "hex":
-            return "\n".join(o["gradient"])
+            return "\n".join(" ".join(f) for f in o["families"])
         if how == "css":
-            lines = ["  --palette-%d: %s;" % (i + 1, h) for i, h in enumerate(o["gradient"])]
+            lines = ["  --family%d-%d: %s;" % (i + 1, j + 1, h) for i, f in enumerate(o["families"])
+                     for j, h in enumerate(f)]
             for i, vs in enumerate(o["variants"]):
                 lines += ["  --hue%d-%d: %s;" % (i + 1, j, h) for j, h in enumerate(vs)]
             return ":root {\n" + "\n".join(lines) + "\n}"
@@ -528,7 +605,7 @@ class App:
         self.start = pal.state()
         self.title, self.fmt, self.out_file, self.nested = title, fmt, out_file, nested
         self.rng = random.Random()
-        self.row = 0                      # 0-2 the hues, 3 on the knobs
+        self.row = 0                      # 0-2 the hues, then the basics, then the effects
         self.back = []
         self.prompt = None                # (what, text) while typing
         self.msg = None
@@ -553,7 +630,10 @@ class App:
         self.back = (self.back + [self.p.state()])[-50:]
 
     def knob(self):
-        return KNOBS[self.row - 3] if self.row >= 3 else None
+        return KNOBS[self.row - K0] if self.row >= K0 else None
+
+    def basic(self):
+        return BASICS[self.row - 3] if 3 <= self.row < K0 else None
 
     # --- key handling -------------------------------------------------------
 
@@ -581,7 +661,7 @@ class App:
         elif k in ("esc", "q"):
             self.done = True
         elif k in ("up", "down", "tab", "S-tab"):
-            rows = list(range(n)) + list(range(3, 3 + len(KNOBS)))
+            rows = list(range(n)) + list(range(3, K0 + len(KNOBS)))
             step = 1 if k in ("down", "tab") else -1
             self.row = rows[(rows.index(self.row) + step) % len(rows)]
         elif k in ("left", "right", "S-left", "S-right"):
@@ -624,14 +704,15 @@ class App:
             p.hues = [(h + (10 if k in (">", ".") else -10)) % 360 for h in p.hues]
             self.changed()
         elif k in ("+", "=", "-", "_"):
-            p.steps = max(2, min(16, p.steps + (1 if k in ("+", "=") else -1)))
+            p.members = max(1, min(5, p.members + (1 if k in ("+", "=") else -1)))
+            self.say(f"{p.members} colours per family")
             self.changed()
         elif k == "x" and self.row < 3:
             p.locks ^= {self.row}
             self.say(f"hue {self.row + 1} " + ("held through shuffles" if self.row in p.locks else "free"))
         elif k == "0":
-            if self.row < 3:
-                self.say("a hue has no zero · N sets every slider to 0")
+            if self.row < K0:
+                self.say("0 is for effects · N sets every effect to 0")
             else:
                 name, label = self.knob()[:2]
                 p.knobs[name] = 0
@@ -640,14 +721,14 @@ class App:
         elif k == "N":
             self.keep()
             p.set_theme("neutral")
-            self.say("every slider at 0: the bases are the neutral hues")
+            self.say("every effect at 0: the families are plain")
             self.changed()
         elif k == "8":
             p.snap = not p.snap
             self.say("snapped to xterm-256" if p.snap else "full colour")
             self.changed()
         elif k == "#":
-            if self.row < 3 or self.knob()[0] == "mix":
+            if self.row < 3 or (self.knob() and self.knob()[0] == "mix"):
                 self.prompt = ("hex", "")
             else:
                 self.say("# works on a hue row or the tint row")
@@ -666,6 +747,9 @@ class App:
         p = self.p
         if self.row < 3:
             p.hues[self.row] = (p.hues[self.row] + 2 * step) % 360
+        elif self.basic():
+            name, _, lo, hi = self.basic()[:4]
+            setattr(p, name, max(lo, min(hi, getattr(p, name) + (step if name == "members" else step))))
         else:
             name, _, lo, hi, _ = self.knob()
             p.knobs[name] = max(lo, min(hi, p.knobs[name] + step))
@@ -673,9 +757,11 @@ class App:
 
     def take_hex(self, v):
         if self.row < 3:
+            L, a, b = lab(v)
             self.p.hues[self.row] = hue_of(v)
-            self.say(f"hue {self.row + 1} from {v}")
-        elif self.knob()[0] == "mix":
+            self.p.lc[self.row] = [round(100 * L), round(100 * math.hypot(a, b))]
+            self.say(f"family {self.row + 1} from {v}")
+        elif self.knob() and self.knob()[0] == "mix":
             self.p.knobs["tint"] = v
             self.say(f"tint is {v}")
         else:
@@ -734,11 +820,11 @@ class App:
         p, o = self.p, self.p.output()
         x, iw = 2, w - 4
         tx, tr = x + 10, iw - 10 - 6          # track start and width
-        bh = 23
+        bh = 26
         c = Canvas(w, bh + 4)
 
         c.put(0, 1, "palette-pick", BOLD)
-        right = f"{o['theme']} · {len(p.hues)} hues · {p.harmony}" + (" · xterm-256" if p.snap else "")
+        right = f"{o['theme']} · {len(p.hues)} families · {p.harmony}" + (" · xterm-256" if p.snap else "")
         if self.title:
             room = w - len(right) - 18
             title = self.title if len(self.title) <= room else self.title[:max(0, room - 1)] + "…"
@@ -746,59 +832,75 @@ class App:
         c.put(0, w - 1 - len(right), right, BOLD)
         box(c, 1, 0, w, bh)
 
-        c.put(2, x, "gradient", DIM)
-        cells(c, 2, tx, tr + 6, o["gradient"], text=True)
-        cells(c, 3, tx, tr + 6, o["gradient"])
-        bad = o["min_step"] < CLOSE
-        verdict = "two steps blur" if bad else "every step reads"
-        c.put(4, tx, f"{p.steps} steps · nearest pair ΔE {o['min_step']} · {verdict} · bases ΔE {o['min_base']}",
-              RED if bad else DIM, limit=tr + 6)
+        # The palette: every family in order, a gap between families.
+        fams = o["families"]
+        gap, m = 1, p.members
+        cw = (tr + 6 - gap * (len(fams) - 1)) // (len(fams) * m)
+        c.put(2, x, "palette", DIM)
+        for i, f in enumerate(fams):
+            for j, v in enumerate(f):
+                cx = tx + i * (m * cw + gap) + j * cw
+                c.put(2, cx, (v if cw >= 8 else "").center(cw), BG(v) + FG(ink(v)))
+                c.put(3, cx, " " * cw, BG(v))
+        near, cross = o["min_sibling"], o["min_family"]
+        verdict = "clear" if o["clear"] else \
+            "siblings blur" if near < CLOSE else "families too close"
+        line = (f"siblings ΔE ≥ {near} · " if m > 1 else "") + f"families ΔE ≥ {cross} · {verdict}"
+        c.put(4, tx, line, DIM if o["clear"] else RED, limit=tr + 6)
 
-        # Each hue: its neutral colour, its base as the sliders treat it, then
-        # the variants around that base, dark to light.
-        nw, bw = 9, 9
-        vx, vw = tx + nw + bw + 2, tr - nw - bw - 2
-        c.put(6, tx, "neutral", DIM)
-        c.put(6, tx + nw + 1, "base", DIM)
-        c.put(6, vx, "variants, dark to light", DIM)
+        # Each family: the base in the middle, its siblings either side, then
+        # shades of the base, dark to light.
+        fw = min(9, (tr - 12) // m)
+        sx, sw = tx + fw * m + 2, tr - fw * m - 2
+        c.put(6, tx, "family, base in the middle", DIM)
+        c.put(6, sx, "shades", DIM)
         for i in range(3):
             y = 7 + i
             if i >= len(p.hues):
                 c.put(y, x, "  3", DIM)
-                c.put(y, tx, "press 3 for a third hue", DIM)
+                c.put(y, tx, "press 3 for a third family", DIM)
                 continue
             here = self.row == i and self.prompt is None
             lock = " x" if i in p.locks else ""
             c.put(y, x, ("› " if here else "  ") + f"hue {i + 1}{lock}", BOLD if here else DIM)
-            n, b = o["neutral"][i], o["bases"][i]
-            c.put(y, tx, " " * nw, BG(n))
-            c.put(y, tx + nw + 1, b.center(bw), BG(b) + FG(ink(b)) + BOLD)
-            cells(c, y, vx, vw, o["variants"][i], mark=VARIANTS // 2)
+            for j, v in enumerate(fams[i]):
+                base = j == (m - 1) // 2 and m % 2
+                text = v if fw >= 8 else "◆" if base else ""
+                c.put(y, tx + j * fw, text.center(fw), BG(v) + FG(ink(v)) + (BOLD if base else ""))
+            cells(c, y, sx, sw, o["variants"][i], mark=VARIANTS // 2)
             c.put(y, tx + tr + 1, f"{p.hues[i]:>3}°", BOLD if here else DIM)
 
-        c.put(11, tx, "sliders: effects on the neutral hues · 0 is none", DIM)
-        for r, (name, label, lo, hi, _) in enumerate(KNOBS):
-            y = 12 + r
-            here = self.row == 3 + r and self.prompt is None
+        def meter(y, label, lo, hi, v, here, value):
             c.put(y, x, ("› " if here else "  ") + label, BOLD if here else DIM)
-            v = p.knobs[name]
-            zero, pos = slot(lo, hi, 0, tr), slot(lo, hi, v, tr)
+            zero, pos = slot(lo, hi, max(lo, 0), tr), slot(lo, hi, v, tr)
             for j in range(tr):
                 if j == pos:
-                    ch, st = "●", BOLD if v else DIM
+                    ch, st = "●", BOLD if v != max(lo, 0) else DIM
                 elif min(zero, pos) < j < max(zero, pos):
                     ch, st = "─", BOLD + FG("#ffffff")
                 else:
-                    ch, st = "┼" if j == zero else "─", DIM
+                    ch, st = "┼" if j == zero and lo < 0 else "─", DIM
                 c.put(y, tx + j, ch, st)
-            c.put(y, tx + tr + 1, f"{v:>+4}" if v else "   0", BOLD if v else DIM)
+            c.put(y, tx + tr + 1, value.rjust(4), BOLD if here else DIM)
+
+        c.put(11, tx, "basics", DIM)
+        for r, (name, label, lo, hi, unit, _) in enumerate(BASICS):
+            v = getattr(p, name)
+            meter(12 + r, label, lo, hi, v, self.row == 3 + r and self.prompt is None, f"{v}{unit}")
+        c.put(14, tx, "effects on top · 0 is none", DIM)
+        for r, (name, label, lo, hi, _) in enumerate(KNOBS):
+            v = p.knobs[name]
+            meter(15 + r, label, lo, hi, v, self.row == K0 + r and self.prompt is None,
+                  f"{v:+}" if v else "0")
         if self.row < 3:
-            what = f"hue {self.row + 1}: ← → turn it · x hold it in shuffles · # take a hex's hue"
+            what = f"hue {self.row + 1}: ← → turn it · x hold it · # set its base from a hex"
+        elif self.basic():
+            what = f"{self.basic()[1]}: {self.basic()[5]}"
         else:
             what = f"{self.knob()[1]}: {KNOB_HELP[self.knob()[0]]}"
-        c.put(22, x, what, DIM, limit=iw)
-        if self.row >= 3 and self.knob()[0] == "mix":
-            c.put(22, x + len(what) + 1, "  ", BG(p.knobs["tint"]))
+        c.put(25, x, what, DIM, limit=iw)
+        if self.knob() and self.knob()[0] == "mix":
+            c.put(25, x + len(what) + 1, "  ", BG(p.knobs["tint"]))
         self.draw_footer(c, w, bh + 1)
         self.out(c.centred(tw, th).render())
 
@@ -815,7 +917,7 @@ class App:
             c.put(y, 1, self.msg[0], self.msg[1], limit=w - 2)
             y += 1
         hints = ["enter done", "esc cancel", "space shuffle", "S all", "b back", "t theme",
-                 "m harmony", "0 zero", "N neutral", "2/3 hues", "x hold", "<> turn", "+- steps", "8 xterm",
+                 "m harmony", "0 zero", "N neutral", "2/3 families", "+- family size", "x hold", "<> turn", "8 xterm",
                  "# hex", "w save", "c copy", "r reset", "⇧ ×10"]
         line = ""
         for hint in hints:
@@ -922,11 +1024,11 @@ def die(msg):
 
 
 def parse(argv):
-    opts = {"title": None, "theme": None, "hues": None, "harmony": None, "steps": None,
+    opts = {"title": None, "theme": None, "hues": None, "harmony": None, "steps": None, "members": None,
             "format": "json", "out": None, "xterm": False, "print": False, "where": None,
             "nested": False, "answer": None}
     takes = {"-t": "title", "--title": "title", "--theme": "theme", "--hues": "hues",
-             "--harmony": "harmony", "-n": "steps", "--steps": "steps", "-f": "format",
+             "--harmony": "harmony", "-n": "steps", "--steps": "steps", "--members": "members", "-f": "format",
              "--format": "format", "-o": "out", "--out": "out", "--answer": "answer"}
     flags = {"-x": "xterm", "--xterm": "xterm", "--print": "print", "--nested": "nested"}
     rest, i = [], 0
@@ -972,14 +1074,18 @@ def build(opts):
         if opts["theme"]:
             die(f"palette-pick: no theme {theme} · try --themes")
         theme = "neutral"
-    hues = last.get("hues") or [230, 160, 90]
+    hues = last.get("hues") or [255, 150, 70]
+    lc = last.get("lc") if last.get("lc") and len(last["lc"]) == len(hues) else None
     if opts["hues"]:
-        hues = []
+        hues, lc = [], []
         for v in re.split(r"[\s,]+", opts["hues"].strip()):
             if re.fullmatch(r"-?\d+(\.\d+)?", v):
                 hues.append(round(float(v)))
-            elif norm(v):
+                lc.append([NEUTRAL_L, NEUTRAL_C])
+            elif norm(v):                     # a hex sets the family's lightness and chroma too
+                L, a, b = lab(norm(v))
                 hues.append(hue_of(norm(v)))
+                lc.append([round(100 * L), round(100 * math.hypot(a, b))])
             else:
                 die(f"palette-pick: not a hue or hex colour: {v}")
         if len(hues) not in (2, 3):
@@ -1003,6 +1109,12 @@ def build(opts):
         knobs = None
     p = Palette(hues, theme, harmony, steps, opts["xterm"] or bool(last.get("snap")), knobs, themes)
     p.locks = {i for i in last.get("locks", []) if i < len(hues)}
+    if lc:
+        p.lc = [list(x) for x in lc]
+    p.sibling = int(last.get("sibling", SIBLING))
+    p.members = int(opts["members"] or last.get("members", MEMBERS))
+    if not 1 <= p.members <= 5:
+        die("palette-pick: --members is 1 to 5")
     return p
 
 
