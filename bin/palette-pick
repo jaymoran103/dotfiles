@@ -9,6 +9,7 @@ a family of steps for each hue.
   -s, --steps N       colours in each family, 1 to 7
       --light LO,HI   the lightness range, darkest and lightest, 38 to 90
       --strength N    how vivid, 60 to 100
+      --preset NAME   start from a hand-tuned palette (see --presets)
   -f, --format FMT    json (the default), hex (a family a line) or css
   -o, --out FILE      also write the palette as JSON on every change
   -x, --xterm         snap to the xterm-256 colour a TUI draws
@@ -22,7 +23,8 @@ A usage error exits 2. It opens on your last pick, with any of --hues,
 --steps, --light and --strength on top, so a caller can reopen the palette
 it saved.
 
-Three things to set:
+Start from a preset: p and P step through palettes tuned by hand, each
+checked in full colour and in xterm-256. Then three things to set:
 
 1 hues. Up to 6, though 2 or 3 usually read best. On a hue row, [ and ]
   step through a spectrum picked by eye to look evenly spaced, ← → nudge,
@@ -79,7 +81,19 @@ STRENGTH = (60, 100)            # below 60%, steps start to read as grey
 MAX_HUES, MAX_STEPS = 6, 7
 CLOSE, APART = 3.0, 6.0         # ΔE: steps closer than CLOSE look alike;
                                 # families closer than APART blur together
-DEFAULT = dict(hues=[22, 325, 262], lo=40, hi=74, strength=90, steps=5)
+# Hand-tuned starting points. Each one is checked by eye in full colour and
+# snapped to xterm-256, and every pair of its colours tells apart in both.
+PRESETS = [
+    ("ember", "red, plum and blue, vivid", dict(hues=[22, 325, 262], lo=40, hi=74, strength=90, steps=5)),
+    ("field", "blue, green and orange, like a summer map", dict(hues=[262, 145, 58], lo=42, hi=76, strength=92, steps=5)),
+    ("meadow", "rose, sky and green, light and easy", dict(hues=[22, 238, 145], lo=56, hi=82, strength=82, steps=4)),
+    ("dusk", "red, blue and violet, deep", dict(hues=[22, 262, 295], lo=38, hi=66, strength=85, steps=4)),
+    ("citrus", "yellow, coral and teal, bright", dict(hues=[100, 40, 180], lo=58, hi=84, strength=90, steps=4)),
+    ("candy", "pink, cyan and lime, playful", dict(hues=[350, 210, 125], lo=56, hi=86, strength=92, steps=4)),
+    ("ocean", "blue, cyan and green, cool", dict(hues=[262, 210, 145], lo=42, hi=78, strength=88, steps=4)),
+    ("pair", "blue against orange, two families only", dict(hues=[262, 58], lo=50, hi=80, strength=92, steps=5)),
+]
+DEFAULT = dict(PRESETS[0][2], preset=PRESETS[0][0])
 
 # A spectrum picked by eye: hues that read as evenly spaced at one lightness.
 # OKLCH bunches the yellows and spreads the blues, so the degrees are uneven.
@@ -95,10 +109,7 @@ def lightness_steps(lo, hi, n):
 def families(p):
     """Each hue's family, dark to light. Snapped as one palette, if asked."""
     fams = [[rel(L, p.strength, h) for L in lightness_steps(p.lo, p.hi, p.steps)] for h in p.hues]
-    if p.snap:
-        flat = snap_hue([c for f in fams for c in f])
-        fams = [flat[i * p.steps:(i + 1) * p.steps] for i in range(len(fams))]
-    return fams
+    return snap_hue(fams) if p.snap else fams
 
 
 def judge(fams):
@@ -192,19 +203,24 @@ CUBE = [hexof(r, g, b) for r in STEPS for g in STEPS for b in STEPS]
 CUBE_LAB = {}
 
 
-def snap_hue(colours):
-    """Each colour to an xterm-256 colour, none used twice. Never a grey or
-    a near-grey, and a miss in hue costs twice a miss in lightness."""
+def snap_hue(fams):
+    """Each family's colours to xterm-256 colours, none used twice. Never a grey
+    or a near-grey, a miss in hue costs twice a miss in lightness, and each step
+    stays lighter than the one before, so a family still reads dark to light."""
     if not CUBE_LAB:
         CUBE_LAB.update((c, lab(c)) for c in CUBE if math.hypot(*lab(c)[1:]) > 0.045)
     used, out = set(), []
-    for h in colours:
-        L, a, b = lab(h)
-        pick = min((c for c in CUBE_LAB if c not in used),
-                   key=lambda c: math.hypot(L - CUBE_LAB[c][0], 2 * (a - CUBE_LAB[c][1]),
-                                            2 * (b - CUBE_LAB[c][2])))
-        used.add(pick)
-        out.append(pick)
+    for f in fams:
+        prev, row = -1.0, []
+        for h in f:
+            L, a, b = lab(h)
+            cost = lambda c: math.hypot(L - CUBE_LAB[c][0], 2 * (a - CUBE_LAB[c][1]), 2 * (b - CUBE_LAB[c][2]))
+            free = [c for c in CUBE_LAB if c not in used]
+            pick = min((c for c in free if CUBE_LAB[c][0] > prev + 0.02), key=cost, default=None) or min(free, key=cost)
+            used.add(pick)
+            row.append(pick)
+            prev = CUBE_LAB[pick][0]
+        out.append(row)
     return out
 
 
@@ -241,18 +257,32 @@ def write_atomic(path, text):
 
 
 class Palette:
-    def __init__(self, hues, lo, hi, strength, steps, snap):
+    def __init__(self, hues, lo, hi, strength, steps, snap, preset=None):
         self.hues = [round(h) % 360 for h in hues]
         self.lo, self.hi, self.strength, self.steps, self.snap = lo, hi, strength, steps, snap
-        self.locks = set()
+        self.locks, self.preset = set(), preset
 
     def state(self):
         return dict(hues=list(self.hues), lo=self.lo, hi=self.hi, strength=self.strength,
-                    steps=self.steps, locks=sorted(self.locks))
+                    steps=self.steps, locks=sorted(self.locks), preset=self.preset)
 
     def restore(self, s):
         self.hues, self.lo, self.hi = list(s["hues"]), s["lo"], s["hi"]
         self.strength, self.steps, self.locks = s["strength"], s["steps"], set(s["locks"])
+        self.preset = s.get("preset")
+
+    def use(self, name):
+        """Take a preset's hues, range, strength and steps."""
+        v = next(p for n, _, p in PRESETS if n == name)
+        self.hues, self.lo, self.hi = list(v["hues"]), v["lo"], v["hi"]
+        self.strength, self.steps, self.locks, self.preset = v["strength"], v["steps"], set(), name
+
+    @property
+    def edited(self):
+        """True when the palette has moved off its preset."""
+        v = next((p for n, _, p in PRESETS if n == self.preset), None)
+        return v is not None and (self.hues, self.lo, self.hi, self.strength, self.steps) != \
+            (v["hues"], v["lo"], v["hi"], v["strength"], v["steps"])
 
     def add(self, after):
         """A hue after row `after`: the spectrum hue furthest from the rest."""
@@ -292,6 +322,7 @@ class Palette:
     def output(self):
         fams = families(self)
         return {"families": fams, "palette": [c for f in fams for c in f], "hues": list(self.hues),
+                "preset": self.preset, "edited": self.edited,
                 "lightness": [self.lo, self.hi], "strength": self.strength, "steps": self.steps,
                 "xterm": self.snap, "verdict": judge(fams)[0]}
 
@@ -431,7 +462,7 @@ class App:
         self.back = (self.back + [self.p.state()])[-50:]
 
     def rows(self):
-        return [("hue", i) for i in range(len(self.p.hues))] + [("lo",), ("hi",), ("strength",)]
+        return [("preset",)] + [("hue", i) for i in range(len(self.p.hues))] + [("lo",), ("hi",), ("strength",)]
 
     def here(self):
         rows = self.rows()
@@ -461,7 +492,14 @@ class App:
             self.row = (self.row + (1 if k in ("down", "tab") else -1)) % len(self.rows())
         elif len(k) == 1 and k in "123456":
             if int(k) <= len(p.hues):
-                self.row = int(k) - 1
+                self.row = int(k)
+        elif k in ("left", "right", "S-left", "S-right") and here == ("preset",) or k in ("p", "P"):
+            self.keep()
+            names = [n for n, _, _ in PRESETS]
+            at = names.index(p.preset) if p.preset in names else -1
+            step = -1 if k in ("left", "S-left", "P") else 1
+            p.use(names[(at + step) % len(names)] if at >= 0 or step > 0 else names[-1])
+            self.changed()
         elif k in ("left", "right", "S-left", "S-right"):
             self.nudge(here, (1 if k.endswith("right") else -1) * (5 if k.startswith("S-") else 1))
         elif k in ("[", "]") and i is not None:
@@ -477,7 +515,7 @@ class App:
             self.keep()
             at = i if i is not None else len(p.hues) - 1
             if p.add(at):
-                self.row = at + 1
+                self.row = at + 2
                 self.say(f"hue {at + 2} added" + (" · 2 or 3 usually read best" if len(p.hues) > 3 else ""))
                 self.changed()
             else:
@@ -569,7 +607,7 @@ class App:
     # --- layout -------------------------------------------------------------
 
     def height(self):
-        return 2 + 3 + 2 + len(self.p.hues) + 1 + 2 + 2 + 2 + 1 + 2 + 1
+        return 2 + 3 + 2 + 2 + len(self.p.hues) + 1 + 2 + 2 + 2 + 1 + 2 + 1
 
     def draw(self):
         tw, th = os.get_terminal_size(self.tty)
@@ -586,7 +624,7 @@ class App:
         c = Canvas(w, bh + 4)
 
         c.put(0, 1, "palette-pick", BOLD)
-        right = f"{n} hue{'s' * (n > 1)} · {p.steps} step{'s' * (p.steps > 1)}" + (" · xterm-256" if p.snap else "")
+        right = (f"{p.preset}{'*' if p.edited else ''} · " if p.preset else "") + f"{n} hue{'s' * (n > 1)} · {p.steps} step{'s' * (p.steps > 1)}" + (" · xterm-256" if p.snap else "")
         if self.title:
             room = w - len(right) - 18
             c.put(0, 13, " · " + (self.title if len(self.title) <= room else self.title[:max(0, room - 1)] + "…"))
@@ -615,8 +653,16 @@ class App:
                 cx += 3
             c.put(4, cx, fix, style, limit=tx + tr - cx)
 
+        # 0: the preset this palette started from.
+        on = here == ("preset",)
+        c.put(6, x, ("› " if on else "  ") + "preset", BOLD if on else DIM)
+        blurb = next((b for n, b, _ in PRESETS if n == p.preset), "")
+        name = (p.preset or "your own") + ("*" if p.edited else "")
+        c.put(6, tx, f"‹ {name} ›", BOLD)
+        c.put(6, tx + len(name) + 5, blurb + (" · changed since" if p.edited else ""), DIM, limit=tr - len(name) - 5)
+
         # 1: the hues, then the spectrum they come from.
-        y = 6
+        y = 8
         c.put(y, x, "1 hues", BOLD)
         c.put(y, x + 8, "[ ] spectrum · ← → nudge · a add · d drop · e color-pick", DIM)
         for i, f in enumerate(fams):
@@ -677,7 +723,8 @@ class App:
 
         # What the row under the cursor does.
         y += 2
-        help_ = {"hue": "[ ] step through the spectrum · ← → nudge · x hold · # hex",
+        help_ = {"preset": "← → or p and P step through the presets · b goes back",
+                 "hue": "[ ] step through the spectrum · ← → nudge · x hold · # hex",
                  "lo": "← → move the dark end · ⇧ by 5", "hi": "← → move the light end · ⇧ by 5",
                  "strength": "← → by 5% · 60% is the floor, so nothing goes grey"}
         if here:
@@ -695,7 +742,7 @@ class App:
         if self.msg:
             c.put(y, 1, self.msg[0], self.msg[1], limit=w - 2)
             y += 1
-        hints = ["enter done", "esc cancel", "↑↓ rows", "1-6 a hue", "space shuffle", "b back",
+        hints = ["enter done", "esc cancel", "↑↓ rows", "p preset", "1-6 a hue", "space shuffle", "b back",
                  "+- steps", "8 xterm", "c copy", "r reset"]
         line = ""
         for hint in hints:
@@ -788,9 +835,9 @@ def die(msg):
 
 
 def parse(argv):
-    opts = {"title": None, "hues": None, "steps": None, "light": None, "strength": None, "format": "json", "out": None, "xterm": False,
+    opts = {"preset": None, "title": None, "hues": None, "steps": None, "light": None, "strength": None, "format": "json", "out": None, "xterm": False,
             "print": False, "where": None, "nested": False, "answer": None}
-    takes = {"-t": "title", "--title": "title", "--hues": "hues", "-s": "steps", "--steps": "steps", "--light": "light", "--strength": "strength",
+    takes = {"-t": "title", "--title": "title", "--hues": "hues", "-s": "steps", "--steps": "steps", "--light": "light", "--strength": "strength", "--preset": "preset",
              "-f": "format", "--format": "format", "-o": "out", "--out": "out", "--answer": "answer"}
     flags = {"-x": "xterm", "--xterm": "xterm", "--print": "print", "--nested": "nested"}
     rest, i = [], 0
@@ -798,6 +845,11 @@ def parse(argv):
         a = argv[i]
         if a in ("-h", "--help"):
             print(__doc__.strip())
+            sys.exit(0)
+        if a == "--presets":
+            for name, blurb, v in PRESETS:
+                print(f"{name:<8} {blurb} · hues {','.join(map(str, v['hues']))} · light {v['lo']}-{v['hi']} "
+                      f"· strength {v['strength']} · {v['steps']} steps")
             sys.exit(0)
         if "=" in a and a.split("=", 1)[0] in takes:
             a, val = a.split("=", 1)
@@ -829,6 +881,11 @@ def build(opts):
     last = load_json(LAST)
     if isinstance(last.get("hues"), list) and "lo" in last:
         s.update({k: last[k] for k in DEFAULT if k in last})
+    if opts["preset"]:
+        v = next((p for n, _, p in PRESETS if n == opts["preset"]), None)
+        if not v:
+            die(f"palette-pick: no preset {opts['preset']} · try --presets")
+        s.update(v, preset=opts["preset"])
     if opts["hues"]:
         hues = []
         for v in re.split(r"[\s,]+", opts["hues"].strip()):
@@ -857,7 +914,8 @@ def build(opts):
     lo = max(BAND[0], min(BAND[1], int(s["lo"])))
     hi = max(lo, min(BAND[1], int(s["hi"])))
     strength = max(STRENGTH[0], min(STRENGTH[1], int(s["strength"])))
-    p = Palette(s["hues"][:MAX_HUES], lo, hi, strength, max(1, min(MAX_STEPS, int(s["steps"]))), opts["xterm"])
+    p = Palette(s["hues"][:MAX_HUES], lo, hi, strength, max(1, min(MAX_STEPS, int(s["steps"]))), opts["xterm"],
+                s.get("preset") if s.get("preset") in [n for n, _, _ in PRESETS] else None)
     p.locks = {i for i in last.get("locks", []) if isinstance(i, int) and i < len(p.hues)}
     return p
 
