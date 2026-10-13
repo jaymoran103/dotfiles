@@ -109,6 +109,23 @@ KNOBS = (("L", "light", -45, 25, 0), ("C", "chroma", -14, 23, 0), ("stagger", "s
          ("spread", "spread", -NEUTRAL_SPREAD, 26, 1), ("drift", "drift", -45, 45, 1), ("fade", "fade", 0, 100, 1),
          ("mix", "tint", 0, 60, 0), ("lift", "lift", 0, 120, -1), ("cap", "cap", 0, 120, 1))
 
+KNOB_HELP = {
+    "L": "lighter or darker bases", "C": "stronger or greyer bases",
+    "stagger": "first base lighter, last base darker", "spread": "variants reach further from their base",
+    "drift": "variants turn hue toward their ends", "fade": "variants lose colour toward their ends",
+    "mix": "everything mixes toward the tint colour · # sets it", "lift": "blacks lift toward grey",
+    "cap": "whites drop toward grey",
+}
+
+
+def slot(lo, hi, v, w):
+    """The column for v on a w-wide slider. Zero sits mid-track when the knob
+    goes both ways, at the left end when it only goes up."""
+    if lo >= 0:
+        return round((v - lo) * (w - 1) / (hi - lo))
+    mid = (w - 1) // 2
+    return mid + round(v * (w - 1 - mid) / hi) if v >= 0 else mid - round(v * mid / lo)
+
 
 def anchors(p):
     """Each base as (L, C, h), before tint and levels."""
@@ -140,7 +157,21 @@ def gradient(p):
         f = u - j
         (L0, C0, h0), (L1, C1, h1) = a[j], a[j + 1]
         dh = (h1 - h0 + 180) % 360 - 180
-        out.append(paint(L0 + (L1 - L0) * f, C0 + (C1 - C0) * f, h0 + dh * f, p.knobs, p.snap))
+        out.append(paint(L0 + (L1 - L0) * f, C0 + (C1 - C0) * f, h0 + dh * f, p.knobs))
+    return snap_apart(out) if p.snap else out
+
+
+def snap_apart(colours):
+    """Each colour to its nearest xterm-256 colour, none used twice, so steps
+    that were apart in full colour stay apart on a 256-colour screen."""
+    if not LAB256:
+        LAB256.update((h, lab(h)) for h in XTERM256)
+    used, out = set(), []
+    for h in colours:
+        here = lab(h)
+        pick = min((c for c in XTERM256 if c not in used), key=lambda c: math.dist(here, LAB256[c]))
+        used.add(pick)
+        out.append(pick)
     return out
 
 
@@ -227,6 +258,11 @@ def delta(a, b):
 
 
 STEPS = (0, 95, 135, 175, 215, 255)
+
+
+XTERM256 = [hexof(r, g, b) for r in STEPS for g in STEPS for b in STEPS] + \
+    [hexof(*(8 + 10 * i,) * 3) for i in range(24)]
+LAB256 = {}
 
 
 def xterm(h):
@@ -437,7 +473,7 @@ def cells(c, y, x, w, colours, mark=None, text=False):
     n = len(colours)
     for j, v in enumerate(colours):
         a, b = x + j * w // n, x + (j + 1) * w // n
-        label = v if text and b - a >= 7 else ("◆" if j == mark else "")
+        label = v if text and b - a >= 9 else ("◆" if j == mark else "")
         c.put(y, a, label.center(b - a), BG(v) + FG(ink(v)))
 
 
@@ -702,9 +738,11 @@ class App:
         c = Canvas(w, bh + 4)
 
         c.put(0, 1, "palette-pick", BOLD)
+        right = f"{o['theme']} · {len(p.hues)} hues · {p.harmony}" + (" · xterm-256" if p.snap else "")
         if self.title:
-            c.put(0, 13, " · " + self.title, "", limit=w - 40)
-        right = f"{o['theme']} · {len(p.hues)} hues · {p.harmony}"
+            room = w - len(right) - 18
+            title = self.title if len(self.title) <= room else self.title[:max(0, room - 1)] + "…"
+            c.put(0, 13, " · " + title)
         c.put(0, w - 1 - len(right), right, BOLD)
         box(c, 1, 0, w, bh)
 
@@ -713,9 +751,8 @@ class App:
         cells(c, 3, tx, tr + 6, o["gradient"])
         bad = o["min_step"] < CLOSE
         verdict = "two steps blur" if bad else "every step reads"
-        c.put(4, tx, f"{p.steps} steps · nearest pair ΔE {o['min_step']} · {verdict}", RED if bad else DIM)
-        if p.snap:
-            c.put(4, tx + tr - 3, "xterm-256", DIM)
+        c.put(4, tx, f"{p.steps} steps · nearest pair ΔE {o['min_step']} · {verdict} · bases ΔE {o['min_base']}",
+              RED if bad else DIM, limit=tr + 6)
 
         # Each hue: its neutral colour, its base as the sliders treat it, then
         # the variants around that base, dark to light.
@@ -739,24 +776,29 @@ class App:
             cells(c, y, vx, vw, o["variants"][i], mark=VARIANTS // 2)
             c.put(y, tx + tr + 1, f"{p.hues[i]:>3}°", BOLD if here else DIM)
 
-        c.put(11, tx, "every slider is an effect on the neutral hues · 0 is none", DIM)
-        for r, (name, label, lo, hi, t) in enumerate(KNOBS):
+        c.put(11, tx, "sliders: effects on the neutral hues · 0 is none", DIM)
+        for r, (name, label, lo, hi, _) in enumerate(KNOBS):
             y = 12 + r
             here = self.row == 3 + r and self.prompt is None
             c.put(y, x, ("› " if here else "  ") + label, BOLD if here else DIM)
             v = p.knobs[name]
-            pos = round((v - lo) * (tr - 1) / (hi - lo))
-            zero = round(-lo * (tr - 1) / (hi - lo))
+            zero, pos = slot(lo, hi, 0, tr), slot(lo, hi, v, tr)
             for j in range(tr):
-                trial = dict(p.knobs, **{name: lo + (hi - lo) * j / (tr - 1)})
-                cell = variant(p, 0, t, trial)
-                mark = "┃" if j == pos else "╎" if j == zero else " "
-                c.put(y, tx + j, mark, BG(cell) + FG(ink(cell)) + ("" if j == pos else DIM))
-            c.put(y, tx + tr + 1, f"{v:>+4}" if v else "   0", BOLD if here else DIM)
-            if name == "mix":
-                c.put(y, tx + tr + 1, "  ", BG(p.knobs["tint"]))
-
-        c.put(22, tx, f"bases ΔE {o['min_base']} apart at the nearest", DIM)
+                if j == pos:
+                    ch, st = "●", BOLD if v else DIM
+                elif min(zero, pos) < j < max(zero, pos):
+                    ch, st = "─", BOLD + FG("#ffffff")
+                else:
+                    ch, st = "┼" if j == zero else "─", DIM
+                c.put(y, tx + j, ch, st)
+            c.put(y, tx + tr + 1, f"{v:>+4}" if v else "   0", BOLD if v else DIM)
+        if self.row < 3:
+            what = f"hue {self.row + 1}: ← → turn it · x hold it in shuffles · # take a hex's hue"
+        else:
+            what = f"{self.knob()[1]}: {KNOB_HELP[self.knob()[0]]}"
+        c.put(22, x, what, DIM, limit=iw)
+        if self.row >= 3 and self.knob()[0] == "mix":
+            c.put(22, x + len(what) + 1, "  ", BG(p.knobs["tint"]))
         self.draw_footer(c, w, bh + 1)
         self.out(c.centred(tw, th).render())
 
