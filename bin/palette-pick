@@ -1,0 +1,950 @@
+#!/usr/bin/env python3
+"""palette-pick — pick two or three base hues and a theme, get a palette.
+
+  palette-pick [options]
+
+  -t, --title TEXT    say what the palette is for, on the top line
+      --theme NAME    start from this theme (see --themes)
+      --hues LIST     start hues, 2 or 3, as degrees or hex: 210,160,95
+      --harmony NAME  how shuffles space the hues (see --themes)
+  -n, --steps N       gradient steps, 2 to 16 (default 6)
+  -f, --format FMT    json (the default), hex (the gradient, one a line) or css
+  -o, --out FILE      also write the palette as JSON on every change
+  -x, --xterm         snap every colour to the xterm-256 colour a TUI draws
+      --print         print the palette for the options given, no picker
+      --themes        list the themes and harmonies, then exit
+      --tab           pick in a new Ghostty tab, and this process waits
+      --split         the same, in a split to the right
+      --nested        the caller already holds the alternate screen
+
+Enter prints the palette and exits 0. Esc or q prints nothing and exits 1.
+A usage error exits 2. With no --theme or --hues it opens on your last pick.
+
+Hues sit in OKLCH, so bases at one lightness look equally light. A theme
+is a handful of knobs: lightness, chroma, a stagger that lifts the first
+base and drops the last, the spread, hue drift and chroma fade of the
+variants around each base, a tint to mix toward, and lo and hi output
+levels. The gradient runs through the bases. Variants run dark to light.
+
+Space shuffles the hues within the harmony and S shuffles everything.
+b steps back through shuffles. x on a hue row keeps it through shuffles.
+t and m step the theme and the harmony, and 2 or 3 sets the hue count.
+< and > turn every hue at once. + and - change the gradient steps.
+# types a hex: on a hue row it takes that colour's hue, on the tint row
+the tint itself. w saves the knobs as a theme of your own, in
+~/.config/palette-pick/themes.json. c copies the output, r resets.
+"""
+
+import base64
+import json
+import math
+import os
+import random
+import re
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import tty
+
+HOME = os.path.expanduser("~")
+STATE = os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local", "state"))
+CONFIG = os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config"))
+LAST = os.path.join(STATE, "palette-pick", "last.json")
+USER_THEMES = os.path.join(CONFIG, "palette-pick", "themes.json")
+
+BOLD, DIM, REV, RED = "\x1b[1m", "\x1b[2m", "\x1b[7m", "\x1b[31m"
+MAX_W, MIN_W, MIN_H = 76, 56, 25
+VARIANTS = 9
+CLOSE = 3.0          # steps nearer than this, in OKLab ΔE×100, read as one colour
+
+
+# --- rules ------------------------------------------------------------------
+# A theme is these knobs. L and C are OKLCH lightness and chroma, ×100.
+# stagger lifts the first base and drops the last, so the gradient also
+# runs light to dark. spread, drift and fade shape the variants: how far
+# their lightness reaches, how far their hue turns, how much chroma the
+# ends lose. mix pulls everything toward tint. lo and hi are output levels.
+
+THEMES = {
+    "pastel": dict(L=85, C=9,  stagger=8,  spread=10, drift=8,  fade=40, tint="#ffffff", mix=8, lo=0, hi=255),
+    "soft":   dict(L=75, C=12, stagger=6,  spread=14, drift=6,  fade=30, tint="#ffffff", mix=0, lo=0, hi=255),
+    "neon":   dict(L=72, C=30, stagger=0,  spread=16, drift=12, fade=15, tint="#ffffff", mix=0, lo=0, hi=255),
+    "jewel":  dict(L=52, C=17, stagger=6,  spread=18, drift=8,  fade=10, tint="#ffffff", mix=0, lo=0, hi=255),
+    "muted":  dict(L=63, C=7,  stagger=8,  spread=16, drift=4,  fade=20, tint="#808080", mix=6, lo=16, hi=240),
+    "earth":  dict(L=58, C=10, stagger=10, spread=18, drift=10, fade=25, tint="#8a6a48", mix=16, lo=0, hi=255),
+    "film":   dict(L=67, C=11, stagger=6,  spread=16, drift=6,  fade=20, tint="#f0e0c0", mix=8, lo=28, hi=232),
+    "dusk":   dict(L=46, C=12, stagger=8,  spread=14, drift=-8, fade=20, tint="#2a2050", mix=10, lo=0, hi=255),
+}
+
+# Hue offsets in degrees from a root. A shuffle picks a root, a harmony
+# when none is set, a direction, and a few degrees of jitter.
+HARMONIES = {
+    2: {"near": (0, 50), "wide": (0, 100), "split": (0, 150), "opposite": (0, 180)},
+    3: {"analog": (0, 35, 70), "fan": (0, 60, 120), "triad": (0, 120, 240), "split": (0, 150, 210)},
+}
+JITTER = 6
+
+# Each knob: name, row label, lowest, highest, and the variant (−1 to 1)
+# its slider previews.
+KNOBS = (("L", "light", 20, 95, 0), ("C", "chroma", 0, 37, 0), ("stagger", "stagger", -30, 30, 0),
+         ("spread", "spread", 0, 40, 1), ("drift", "drift", -45, 45, 1), ("fade", "fade", 0, 100, 1),
+         ("mix", "tint", 0, 60, 0), ("lo", "lo", 0, 120, -1), ("hi", "hi", 135, 255, 1))
+
+
+def anchors(p):
+    """Each base as (L, C, h), before tint and levels."""
+    k, n = p.knobs, len(p.hues)
+    return [(k["L"] + k["stagger"] * (0.5 - i / (n - 1)), k["C"], p.hues[i]) for i in range(n)]
+
+
+def variant(p, i, t, knobs=None):
+    """Base i moved t along its ramp, from −1 (dark end) to 1 (light end)."""
+    k = knobs or p.knobs
+    n = len(p.hues)
+    L = k["L"] + k["stagger"] * (0.5 - i / (n - 1)) + k["spread"] * t
+    return paint(L, k["C"] * (1 - k["fade"] / 100 * abs(t)), p.hues[i] + k["drift"] * t, k, p.snap)
+
+
+def gradient(p):
+    """p.steps colours through the bases, hue by the short way round."""
+    a, out = anchors(p), []
+    for s in range(p.steps):
+        u = s * (len(a) - 1) / (p.steps - 1)
+        j = min(int(u), len(a) - 2)
+        f = u - j
+        (L0, C0, h0), (L1, C1, h1) = a[j], a[j + 1]
+        dh = (h1 - h0 + 180) % 360 - 180
+        out.append(paint(L0 + (L1 - L0) * f, C0 + (C1 - C0) * f, h0 + dh * f, p.knobs, p.snap))
+    return out
+
+
+def paint(L, C, h, k, snap=False):
+    """One colour through the theme: OKLCH into gamut, tint, levels, snap."""
+    r, g, b = lch_rgb(max(0, min(100, L)) / 100, max(0, C) / 100, h)
+    m, t = k["mix"] / 100, rgb(k["tint"])
+    lo, hi = k["lo"], k["hi"]
+    out = tuple(round(lo + (v + (tv - v) * m) * (hi - lo) / 255) for v, tv in zip((r, g, b), t))
+    return xterm(hexof(*out)) if snap else hexof(*out)
+
+
+# --- colour -----------------------------------------------------------------
+
+def rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def hexof(r, g, b):
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def norm(v):
+    """#rrggbb from #rgb, rrggbb, 0xrrggbb and the like, or None."""
+    v = v.strip().strip("\"'").lower()
+    v = v[2:] if v.startswith("0x") else v.lstrip("#")
+    if re.fullmatch(r"[0-9a-f]{3}", v):
+        v = "".join(ch * 2 for ch in v)
+    return "#" + v if re.fullmatch(r"[0-9a-f]{6}", v) else None
+
+
+def lin(c):
+    c /= 255
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def unlin(c):
+    c = max(0.0, min(1.0, c))
+    return round(255 * (12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055))
+
+
+def lab(h):
+    """OKLab of a hex colour."""
+    r, g, b = (lin(v) for v in rgb(h))
+    l, m, s = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b,
+               0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b,
+               0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    l, m, s = (math.copysign(abs(x) ** (1 / 3), x) for x in (l, m, s))
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+
+def hue_of(h):
+    _, a, b = lab(h)
+    return round(math.degrees(math.atan2(b, a))) % 360
+
+
+def linear_rgb(L, C, h):
+    a, b = C * math.cos(math.radians(h)), C * math.sin(math.radians(h))
+    l, m, s = ((L + 0.3963377774 * a + 0.2158037573 * b) ** 3,
+               (L - 0.1055613458 * a - 0.0638541728 * b) ** 3,
+               (L - 0.0894841775 * a - 1.2914855480 * b) ** 3)
+    return (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+
+
+def lch_rgb(L, C, h):
+    """OKLCH to sRGB. Out of gamut, chroma gives way and hue and lightness hold."""
+    inside = lambda c: all(-1e-4 <= v <= 1 + 1e-4 for v in linear_rgb(L, c, h))
+    if not inside(C):
+        lo, hi = 0.0, C
+        for _ in range(16):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if inside(mid) else (lo, mid)
+        C = lo
+    return tuple(unlin(v) for v in linear_rgb(L, C, h))
+
+
+def delta(a, b):
+    return 100 * math.dist(lab(a), lab(b))
+
+
+STEPS = (0, 95, 135, 175, 215, 255)
+
+
+def xterm(h):
+    """The colour xterm-256 draws for h, as hex."""
+    r, g, b = rgb(h)
+    near = lambda v: min(range(6), key=lambda i: abs(STEPS[i] - v))
+    cube = tuple(STEPS[near(v)] for v in (r, g, b))
+    gv = 8 + 10 * min(range(24), key=lambda i: abs(8 + 10 * i - (r + g + b) // 3))
+    err = lambda c: sum((x - y) ** 2 for x, y in zip(c, (r, g, b)))
+    return hexof(*(cube if err(cube) <= err((gv,) * 3) else (gv,) * 3))
+
+
+def FG(h):
+    return "\x1b[38;2;%d;%d;%dm" % rgb(h)
+
+
+def BG(h):
+    return "\x1b[48;2;%d;%d;%dm" % rgb(h)
+
+
+def ink(h):
+    """Black or white, whichever reads on h."""
+    r, g, b = rgb(h)
+    return "#000000" if 0.299 * r + 0.587 * g + 0.114 * b > 140 else "#ffffff"
+
+
+# --- the palette ------------------------------------------------------------
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_atomic(path, text):
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".palette-pick.")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def all_themes():
+    """The built-in themes, then yours on top."""
+    out = {k: dict(v) for k, v in THEMES.items()}
+    for name, knobs in load_json(USER_THEMES).items():
+        if isinstance(knobs, dict):
+            base = dict(THEMES["soft"])
+            base.update({k: v for k, v in knobs.items() if k in base})
+            out[name] = base
+    return out
+
+
+class Palette:
+    def __init__(self, hues, theme, harmony, steps, snap, knobs=None, themes=None):
+        self.themes = themes or all_themes()
+        self.hues = [h % 360 for h in hues]
+        self.theme = theme
+        self.knobs = dict(knobs or self.themes[theme])
+        self.harmony = harmony
+        self.steps = steps
+        self.snap = snap
+        self.locks = set()
+
+    def state(self):
+        return dict(hues=list(self.hues), theme=self.theme, harmony=self.harmony,
+                    knobs=dict(self.knobs), steps=self.steps, locks=set(self.locks))
+
+    def restore(self, s):
+        for k, v in s.items():
+            setattr(self, k, list(v) if k == "hues" else dict(v) if k == "knobs" else set(v) if k == "locks" else v)
+
+    @property
+    def tweaked(self):
+        return self.knobs != self.themes.get(self.theme)
+
+    def set_theme(self, name):
+        self.theme, self.knobs = name, dict(self.themes[name])
+
+    def set_count(self, n):
+        if n == len(self.hues):
+            return
+        if self.harmony not in HARMONIES[n] and self.harmony != "any":
+            self.harmony = "any"
+        if n == 3:
+            self.hues.append((self.hues[-1] + self.hues[-1] - self.hues[0]) % 360)
+        else:
+            self.hues.pop()
+            self.locks.discard(2)
+
+    def shuffle(self, rng, tries=40):
+        """A new set of hues. Sets whose gradient steps blur are passed over,
+        so what a shuffle lands on is one the rules call good."""
+        best = None
+        for _ in range(tries):
+            name = self.shuffle_once(rng)
+            grad = gradient(self)
+            score = min(delta(a, b) for a, b in zip(grad, grad[1:]))
+            if score >= CLOSE:
+                return name
+            if not best or score > best[0]:
+                best = (score, name, list(self.hues))
+        self.hues = best[2]
+        return best[1]
+
+    def shuffle_once(self, rng):
+        n = len(self.hues)
+        name = self.harmony if self.harmony in HARMONIES[n] else rng.choice(list(HARMONIES[n]))
+        offs = HARMONIES[n][name]
+        sign = rng.choice((1, -1))
+        held = sorted(self.locks)
+        root = self.hues[held[0]] - sign * offs[held[0]] if held else rng.uniform(0, 360)
+        for i in range(n):
+            if i not in self.locks:
+                jit = rng.uniform(-JITTER, JITTER) if offs[i] else 0
+                self.hues[i] = round(root + sign * offs[i] + jit) % 360
+        return name
+
+    def shuffle_all(self, rng):
+        self.set_theme(rng.choice(list(self.themes)))
+        self.set_count(rng.choice((2, 3)))
+        return self.shuffle(rng)
+
+    def output(self):
+        grad = gradient(self)
+        bases = [variant(self, i, 0) for i in range(len(self.hues))]
+        return {
+            "theme": self.theme + ("*" if self.tweaked else ""),
+            "harmony": self.harmony,
+            "hues": list(self.hues),
+            "knobs": dict(self.knobs),
+            "xterm": self.snap,
+            "bases": bases,
+            "gradient": grad,
+            "variants": [[variant(self, i, -1 + 2 * j / (VARIANTS - 1)) for j in range(VARIANTS)]
+                         for i in range(len(self.hues))],
+            "min_step": round(min(delta(a, b) for a, b in zip(grad, grad[1:])), 1),
+            "min_base": round(min(delta(a, b) for i, a in enumerate(bases) for b in bases[i + 1:]), 1),
+        }
+
+    def formatted(self, how):
+        o = self.output()
+        if how == "hex":
+            return "\n".join(o["gradient"])
+        if how == "css":
+            lines = ["  --palette-%d: %s;" % (i + 1, h) for i, h in enumerate(o["gradient"])]
+            for i, vs in enumerate(o["variants"]):
+                lines += ["  --hue%d-%d: %s;" % (i + 1, j, h) for j, h in enumerate(vs)]
+            return ":root {\n" + "\n".join(lines) + "\n}"
+        return json.dumps(o, indent=2)
+
+
+# --- drawing ----------------------------------------------------------------
+
+class Canvas:
+    """A grid of (char, style) cells, flushed in one write so nothing tears."""
+
+    def __init__(self, w, h):
+        self.w, self.h = w, h
+        self.cells = [[(" ", "")] * w for _ in range(h)]
+
+    def put(self, y, x, text, style="", limit=None):
+        if not 0 <= y < self.h:
+            return
+        if limit is not None:
+            text = text[:max(0, limit)]
+        row = self.cells[y]
+        for i, ch in enumerate(text):
+            if 0 <= x + i < self.w:
+                row[x + i] = (ch, style)
+
+    def centred(self, w, h):
+        big = Canvas(w, h)
+        oy, ox = (h - self.h) // 2, (w - self.w) // 2
+        for y, row in enumerate(self.cells):
+            big.cells[oy + y][ox:ox + self.w] = row
+        return big
+
+    def render(self):
+        out = ["\x1b[H"]
+        for y, row in enumerate(self.cells):
+            style = None
+            for ch, st in row:
+                if st != style:
+                    out.append("\x1b[0m" + st)
+                    style = st
+                out.append(ch)
+            out.append("\x1b[0m")
+            if y < self.h - 1:
+                out.append("\r\n")
+        return "".join(out)
+
+
+def box(c, y, x, w, h):
+    c.put(y, x, "╭" + "─" * (w - 2) + "╮", DIM)
+    for r in range(y + 1, y + h - 1):
+        c.put(r, x, "│", DIM)
+        c.put(r, x + w - 1, "│", DIM)
+    c.put(y + h - 1, x, "╰" + "─" * (w - 2) + "╯", DIM)
+
+
+def cells(c, y, x, w, colours, mark=None, text=False):
+    """colours side by side across w columns, the spare columns spread out."""
+    n = len(colours)
+    for j, v in enumerate(colours):
+        a, b = x + j * w // n, x + (j + 1) * w // n
+        label = v if text and b - a >= 7 else ("◆" if j == mark else "")
+        c.put(y, a, label.center(b - a), BG(v) + FG(ink(v)))
+
+
+# --- keys -------------------------------------------------------------------
+
+SEQ = {"[A": "up", "[B": "down", "[C": "right", "[D": "left",
+       "OA": "up", "OB": "down", "OC": "right", "OD": "left",
+       "[1;2C": "S-right", "[1;2D": "S-left", "[1;2A": "up", "[1;2B": "down",
+       "[Z": "S-tab"}
+PLAIN = {"\r": "enter", "\n": "enter", "\t": "tab", "\x7f": "bs", "\x08": "bs",
+         "\x03": "ctrl-c"}
+CSI = re.compile(r"\x1b(\[[0-9;]*[A-Za-z~]|O[A-Za-z])")
+PASTE_ON, PASTE_OFF = "\x1b[200~", "\x1b[201~"
+
+
+def keys(data):
+    s, i = data.decode("utf-8", "ignore"), 0
+    while i < len(s):
+        if s.startswith(PASTE_ON, i):
+            end = s.find(PASTE_OFF, i)
+            end = len(s) if end < 0 else end
+            yield "paste:" + s[i + len(PASTE_ON):end]
+            i = end + len(PASTE_OFF)
+            continue
+        m = CSI.match(s, i)
+        if m:
+            yield SEQ.get(m.group(1), "")
+            i = m.end()
+            continue
+        yield "esc" if s[i] == "\x1b" else PLAIN.get(s[i], s[i])
+        i += 1
+
+
+def copy_text(text):
+    """Into the clipboard: a native tool when there is one, else OSC 52."""
+    for cmd in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode(), check=True, timeout=2)
+                return ""
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return "\x1b]52;c;%s\a" % base64.b64encode(text.encode()).decode()
+
+
+# --- app --------------------------------------------------------------------
+
+class App:
+    def __init__(self, pal, title, fmt, out_file, nested):
+        self.tty = os.open("/dev/tty", os.O_RDWR)
+        self.p = pal
+        self.start = pal.state()
+        self.title, self.fmt, self.out_file, self.nested = title, fmt, out_file, nested
+        self.rng = random.Random()
+        self.row = 0                      # 0-2 the hues, 3 on the knobs
+        self.back = []
+        self.prompt = None                # (what, text) while typing
+        self.msg = None
+        self.result = None
+        self.done = False
+
+    def out(self, s):
+        os.write(self.tty, s.encode())
+
+    def say(self, text, style=""):
+        self.msg = (text, style)
+
+    def changed(self):
+        if self.out_file:
+            try:
+                write_atomic(self.out_file, self.p.formatted("json") + "\n")
+            except OSError as e:
+                self.say(f"cannot write {self.out_file}: {e.strerror}", RED)
+
+    def keep(self):
+        """Mark a step b can go back to."""
+        self.back = (self.back + [self.p.state()])[-50:]
+
+    def knob(self):
+        return KNOBS[self.row - 3] if self.row >= 3 else None
+
+    # --- key handling -------------------------------------------------------
+
+    def key(self, k):
+        if k == "ctrl-c":
+            self.done = True
+            return
+        if k.startswith("paste:"):
+            m = re.search(r"#?\b([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b", k[6:])
+            if m:
+                self.prompt = None
+                self.take_hex(norm(m.group(1)))
+            else:
+                self.say("no hex colour in that paste", RED)
+            return
+        if self.prompt is not None:
+            self.prompt_key(k)
+            return
+        self.msg = None
+        k = {"h": "left", "j": "down", "k": "up", "l": "right", "H": "S-left", "L": "S-right"}.get(k, k)
+        p, n = self.p, len(self.p.hues)
+        if k == "enter":
+            self.result = p.formatted(self.fmt)
+            self.done = True
+        elif k in ("esc", "q"):
+            self.done = True
+        elif k in ("up", "down", "tab", "S-tab"):
+            rows = list(range(n)) + list(range(3, 3 + len(KNOBS)))
+            step = 1 if k in ("down", "tab") else -1
+            self.row = rows[(rows.index(self.row) + step) % len(rows)]
+        elif k in ("left", "right", "S-left", "S-right"):
+            self.nudge((1 if k.endswith("right") else -1) * (10 if k.startswith("S-") else 1))
+        elif k == " ":
+            self.keep()
+            name = p.shuffle(self.rng)
+            self.say(f"{name} around {p.hues[0]}°" + (" · held rows kept" if p.locks else ""))
+            self.changed()
+        elif k == "S":
+            self.keep()
+            name = p.shuffle_all(self.rng)
+            self.row = min(self.row, len(p.hues) - 1) if self.row < 3 else self.row
+            self.say(f"{p.theme}, {name}")
+            self.changed()
+        elif k == "b":
+            if self.back:
+                p.restore(self.back.pop())
+                self.row = min(self.row, len(p.hues) - 1) if self.row < 3 else self.row
+                self.changed()
+            else:
+                self.say("nothing to go back to")
+        elif k in ("t", "T"):
+            self.keep()
+            names = list(p.themes)
+            i = names.index(p.theme) if p.theme in names else 0
+            p.set_theme(names[(i + (1 if k == "t" else -1)) % len(names)])
+            self.changed()
+        elif k in ("m", "M"):
+            names = ["any"] + list(HARMONIES[n])
+            i = names.index(p.harmony) if p.harmony in names else 0
+            p.harmony = names[(i + (1 if k == "m" else -1)) % len(names)]
+            self.say(f"shuffles use {p.harmony}" + (" harmony" if p.harmony == "any" else ""))
+        elif k in ("2", "3"):
+            self.keep()
+            p.set_count(int(k))
+            self.row = min(self.row, len(p.hues) - 1) if self.row < 3 else self.row
+            self.changed()
+        elif k in ("<", ">", ",", "."):
+            p.hues = [(h + (10 if k in (">", ".") else -10)) % 360 for h in p.hues]
+            self.changed()
+        elif k in ("+", "=", "-", "_"):
+            p.steps = max(2, min(16, p.steps + (1 if k in ("+", "=") else -1)))
+            self.changed()
+        elif k == "x" and self.row < 3:
+            p.locks ^= {self.row}
+            self.say(f"hue {self.row + 1} " + ("held through shuffles" if self.row in p.locks else "free"))
+        elif k == "8":
+            p.snap = not p.snap
+            self.say("snapped to xterm-256" if p.snap else "full colour")
+            self.changed()
+        elif k == "#":
+            if self.row < 3 or self.knob()[0] == "mix":
+                self.prompt = ("hex", "")
+            else:
+                self.say("# works on a hue row or the tint row")
+        elif k == "w":
+            self.prompt = ("name", "" if p.theme in THEMES else p.theme)
+        elif k == "c":
+            self.out(copy_text(p.formatted(self.fmt)))
+            self.say(f"copied the {self.fmt}")
+        elif k == "r":
+            self.keep()
+            p.restore(self.start)
+            self.say("back to the start")
+            self.changed()
+
+    def nudge(self, step):
+        p = self.p
+        if self.row < 3:
+            p.hues[self.row] = (p.hues[self.row] + 2 * step) % 360
+        else:
+            name, _, lo, hi, _ = self.knob()
+            p.knobs[name] = max(lo, min(hi, p.knobs[name] + step))
+        self.changed()
+
+    def take_hex(self, v):
+        if self.row < 3:
+            self.p.hues[self.row] = hue_of(v)
+            self.say(f"hue {self.row + 1} from {v}")
+        elif self.knob()[0] == "mix":
+            self.p.knobs["tint"] = v
+            self.say(f"tint is {v}")
+        else:
+            self.say("a hex goes on a hue row or the tint row", RED)
+            return
+        self.changed()
+
+    def prompt_key(self, k):
+        what, text = self.prompt
+        if k == "esc":
+            self.prompt = None
+        elif k == "enter":
+            if what == "hex":
+                v = norm(text)
+                if not v:
+                    self.say(f"not a hex colour: {text}", RED)
+                    return
+                self.prompt = None
+                self.take_hex(v)
+            else:
+                self.save_theme(text.strip())
+        elif k == "bs":
+            self.prompt = (what, text[:-1])
+        elif len(k) == 1 and k.isprintable() and len(text) < 16:
+            self.prompt = (what, text + k)
+
+    def save_theme(self, name):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name or ""):
+            self.say("a theme name is lower case letters, digits, - and _", RED)
+            return
+        if name in THEMES:
+            self.say(f"{name} is built in · pick another name", RED)
+            return
+        self.prompt = None
+        saved = load_json(USER_THEMES)
+        saved[name] = dict(self.p.knobs)
+        try:
+            write_atomic(USER_THEMES, json.dumps(saved, indent=2) + "\n")
+        except OSError as e:
+            self.say(f"cannot write {USER_THEMES}: {e.strerror}", RED)
+            return
+        self.p.themes[name] = dict(self.p.knobs)
+        self.p.theme = name
+        self.say(f"saved theme {name}")
+
+    # --- layout -------------------------------------------------------------
+
+    def draw(self):
+        tw, th = os.get_terminal_size(self.tty)
+        w = min(tw, MAX_W)
+        if w < MIN_W or th < MIN_H:
+            c = Canvas(tw, th)
+            c.put(th // 2, 1, f"need {MIN_W}×{MIN_H} · now {tw}×{th}", DIM)
+            self.out(c.render())
+            return
+        p, o = self.p, self.p.output()
+        x, iw = 2, w - 4
+        tx, tr = x + 10, iw - 10 - 6          # track start and width
+        bh = 21
+        c = Canvas(w, bh + 4)
+
+        c.put(0, 1, "palette-pick", BOLD)
+        if self.title:
+            c.put(0, 13, " · " + self.title, "", limit=w - 40)
+        right = f"{o['theme']} · {len(p.hues)} hues · {p.harmony}"
+        c.put(0, w - 1 - len(right), right, BOLD)
+        box(c, 1, 0, w, bh)
+
+        c.put(2, x, "gradient", DIM)
+        cells(c, 2, tx, tr + 6, o["gradient"], text=True)
+        cells(c, 3, tx, tr + 6, o["gradient"])
+        bad = o["min_step"] < CLOSE
+        verdict = "two steps blur" if bad else "every step reads"
+        c.put(4, tx, f"{p.steps} steps · nearest pair ΔE {o['min_step']} · {verdict}", RED if bad else DIM)
+        if p.snap:
+            c.put(4, tx + tr - 3, "xterm-256", DIM)
+
+        for i in range(3):
+            y = 6 + i
+            if i >= len(p.hues):
+                c.put(y, x, "  3", DIM)
+                c.put(y, tx, "press 3 for a third hue", DIM)
+                continue
+            here = self.row == i and self.prompt is None
+            lock = " x" if i in p.locks else ""
+            c.put(y, x, ("› " if here else "  ") + f"{i + 1}{lock}", BOLD if here else DIM)
+            cells(c, y, tx, tr, o["variants"][i], mark=VARIANTS // 2)
+            c.put(y, tx + tr + 1, f"{p.hues[i]:>3}°", BOLD if here else DIM)
+
+        for r, (name, label, lo, hi, t) in enumerate(KNOBS):
+            y = 10 + r
+            here = self.row == 3 + r and self.prompt is None
+            c.put(y, x, ("› " if here else "  ") + label, BOLD if here else DIM)
+            v = p.knobs[name]
+            pos = round((v - lo) * (tr - 1) / (hi - lo))
+            for j in range(tr):
+                trial = dict(p.knobs, **{name: lo + (hi - lo) * j / (tr - 1)})
+                cell = variant(p, 0, t, trial)
+                c.put(y, tx + j, "┃" if j == pos else " ", BG(cell) + FG(ink(cell)))
+            c.put(y, tx + tr + 1, f"{v:>4}", BOLD if here else DIM)
+            if name == "mix":
+                c.put(y, tx + tr + 1, "  ", BG(p.knobs["tint"]))
+
+        c.put(20, tx, f"bases ΔE {o['min_base']} apart at the nearest", DIM)
+        self.draw_footer(c, w, bh + 1)
+        self.out(c.centred(tw, th).render())
+
+    def draw_footer(self, c, w, y):
+        if self.prompt is not None:
+            what, text = self.prompt
+            lead = "hex # " if what == "hex" else "save theme as "
+            c.put(y, 1, lead, BOLD)
+            c.put(y, 1 + len(lead), text)
+            c.put(y, 1 + len(lead) + len(text), " ", REV)
+            c.put(y + 1, 1, "enter ok · esc cancel", DIM)
+            return
+        if self.msg:
+            c.put(y, 1, self.msg[0], self.msg[1], limit=w - 2)
+            y += 1
+        hints = ["enter done", "esc cancel", "space shuffle", "S all", "b back", "t theme",
+                 "m harmony", "2/3 hues", "x hold", "<> turn", "+- steps", "8 xterm",
+                 "# hex", "w save", "c copy", "r reset", "⇧ ×10"]
+        line = ""
+        for hint in hints:
+            if len(line) + len(hint) + 3 > w - 2:
+                c.put(y, 1, line, DIM)
+                y, line = y + 1, ""
+                if y >= c.h:
+                    return
+            line += (" · " if line else "") + hint
+        c.put(y, 1, line, DIM)
+
+    # --- loop ---------------------------------------------------------------
+
+    def run(self):
+        old = termios.tcgetattr(self.tty)
+        self.out(("\x1b[2J" if self.nested else "\x1b[?1049h") + "\x1b[?25l\x1b[?7l\x1b[?2004h")
+        tty.setraw(self.tty)
+        self.changed()
+        try:
+            size, stale = None, True
+            while not self.done:
+                now = os.get_terminal_size(self.tty)
+                if stale or now != size:
+                    self.draw()
+                    size, stale = now, False
+                if select.select([self.tty], [], [], 0.25)[0]:
+                    for k in keys(os.read(self.tty, 4096)):
+                        self.key(k)
+                        if self.done:
+                            break
+                    stale = True
+        finally:
+            termios.tcsetattr(self.tty, termios.TCSADRAIN, old)
+            self.out("\x1b[?2004l\x1b[?7h\x1b[?25h" + ("\x1b[0m\x1b[2J\x1b[H" if self.nested else "\x1b[?1049l"))
+            os.close(self.tty)
+        if self.result:
+            remember(self.p)
+        elif self.out_file:
+            self.p.restore(self.start)        # a cancel puts the live preview back
+            self.changed()
+        return self.result
+
+
+def remember(p):
+    s = p.state()
+    s["locks"] = sorted(s["locks"])
+    s["snap"] = p.snap
+    try:
+        write_atomic(LAST, json.dumps(s) + "\n")
+    except OSError:
+        pass
+
+
+# --- another tab --------------------------------------------------------------
+
+APPLESCRIPT = """
+on run argv
+  tell application "Ghostty"
+    set cfg to new surface configuration
+    set command of cfg to item 2 of argv
+    set wait after command of cfg to false
+    if item 1 of argv is "split" then
+      split (focused terminal of selected tab of front window) direction right with configuration cfg
+    else
+      new tab in front window with configuration cfg
+    end if
+  end tell
+end run
+"""
+
+
+def elsewhere(where, args):
+    """Run the picker in a Ghostty tab or split and wait for its answer."""
+    if sys.platform != "darwin" or not shutil.which("osascript"):
+        die("palette-pick: --tab and --split need Ghostty on macOS")
+    d = tempfile.mkdtemp(prefix="palette-pick.")
+    answer = os.path.join(d, "answer")
+    me = os.path.realpath(__file__)
+    cmd = " ".join(shlex.quote(a) for a in [sys.executable, me, "--answer", answer] + args)
+    r = subprocess.run(["osascript", "-e", APPLESCRIPT, where, cmd], capture_output=True, text=True)
+    if r.returncode:
+        shutil.rmtree(d, ignore_errors=True)
+        die("palette-pick: could not open a Ghostty %s: %s" % (where, r.stderr.strip()))
+    try:
+        t0 = time.time()
+        while not os.path.exists(answer):
+            if not os.path.exists(answer + ".started") and time.time() - t0 > 10:
+                die("palette-pick: the picker %s never started" % where)
+            time.sleep(0.1)
+        with open(answer) as f:
+            return f.read().rstrip("\n") or None
+    except KeyboardInterrupt:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --- main ---------------------------------------------------------------------
+
+def die(msg):
+    """Usage and setup errors exit 2, apart from a cancel's 1."""
+    print(msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def parse(argv):
+    opts = {"title": None, "theme": None, "hues": None, "harmony": None, "steps": None,
+            "format": "json", "out": None, "xterm": False, "print": False, "where": None,
+            "nested": False, "answer": None}
+    takes = {"-t": "title", "--title": "title", "--theme": "theme", "--hues": "hues",
+             "--harmony": "harmony", "-n": "steps", "--steps": "steps", "-f": "format",
+             "--format": "format", "-o": "out", "--out": "out", "--answer": "answer"}
+    flags = {"-x": "xterm", "--xterm": "xterm", "--print": "print", "--nested": "nested"}
+    rest, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            sys.exit(0)
+        if a == "--themes":
+            for name, k in all_themes().items():
+                print(f"{name:<10}" + " ".join(f"{n}={v}" for n, v in k.items()))
+            for n, hs in HARMONIES.items():
+                print(f"\n{n} hues: " + ", ".join(f"{h} {'/'.join(map(str, o))}" for h, o in hs.items()))
+            sys.exit(0)
+        if "=" in a and a.split("=", 1)[0] in takes:
+            a, val = a.split("=", 1)
+            argv = argv[:i] + [a, val] + argv[i + 1:]
+        if a in takes:
+            if i + 1 >= len(argv):
+                die(f"palette-pick: {a} needs a value")
+            opts[takes[a]] = argv[i + 1]
+            if takes[a] != "answer":
+                rest += [a, argv[i + 1]]
+            i += 2
+            continue
+        if a in ("--tab", "--split"):
+            opts["where"] = a[2:]
+        elif a in flags:
+            opts[flags[a]] = True
+            rest.append(a)
+        else:
+            die(f"palette-pick: unknown option {a} · try --help")
+        i += 1
+    return opts, rest
+
+
+def build(opts):
+    """The palette to open on: the options given, over your last pick."""
+    themes = all_themes()
+    last = {} if opts["theme"] or opts["hues"] else load_json(LAST)
+    theme = opts["theme"] or last.get("theme", "soft").rstrip("*")
+    if theme not in themes:
+        if opts["theme"]:
+            die(f"palette-pick: no theme {theme} · try --themes")
+        theme = "soft"
+    hues = last.get("hues") or [230, 160, 90]
+    if opts["hues"]:
+        hues = []
+        for v in re.split(r"[\s,]+", opts["hues"].strip()):
+            if re.fullmatch(r"-?\d+(\.\d+)?", v):
+                hues.append(round(float(v)))
+            elif norm(v):
+                hues.append(hue_of(norm(v)))
+            else:
+                die(f"palette-pick: not a hue or hex colour: {v}")
+        if len(hues) not in (2, 3):
+            die("palette-pick: --hues takes 2 or 3")
+    harmony = opts["harmony"] or last.get("harmony", "any")
+    if harmony != "any" and harmony not in HARMONIES[len(hues)]:
+        if opts["harmony"]:
+            die(f"palette-pick: no {len(hues)}-hue harmony {harmony} · try --themes")
+        harmony = "any"
+    steps = opts["steps"] or last.get("steps", 6)
+    try:
+        steps = int(steps)
+    except ValueError:
+        die("palette-pick: --steps takes a number")
+    if not 2 <= steps <= 16:
+        die("palette-pick: --steps is 2 to 16")
+    if opts["format"] not in ("json", "hex", "css"):
+        die("palette-pick: --format is json, hex or css")
+    knobs = last.get("knobs") if last and not opts["theme"] else None
+    if knobs and set(knobs) != set(themes[theme]):
+        knobs = None
+    p = Palette(hues, theme, harmony, steps, opts["xterm"] or bool(last.get("snap")), knobs, themes)
+    p.locks = {i for i in last.get("locks", []) if i < len(hues)}
+    return p
+
+
+def main():
+    opts, rest = parse(sys.argv[1:])
+    if opts["where"]:
+        result = elsewhere(opts["where"], [a for a in rest if a != "--nested"])
+    else:
+        p = build(opts)
+        if opts["print"]:
+            print(p.formatted(opts["format"]))
+            if opts["out"]:
+                write_atomic(opts["out"], p.formatted("json") + "\n")
+            return
+        try:
+            open("/dev/tty").close()
+        except OSError:
+            die("palette-pick: needs a terminal · or use --print")
+        signal.signal(signal.SIGHUP, lambda *_: sys.exit(1))
+        result = None
+        if opts["answer"]:
+            write_atomic(opts["answer"] + ".started", "")
+        try:
+            result = App(p, opts["title"], opts["format"], opts["out"], opts["nested"]).run()
+        finally:
+            if opts["answer"]:
+                write_atomic(opts["answer"], (result or "") + "\n")
+    if not result:
+        sys.exit(1)
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
