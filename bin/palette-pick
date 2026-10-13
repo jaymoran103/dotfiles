@@ -7,6 +7,8 @@ a family of steps for each hue.
   -t, --title TEXT    say what the palette is for, on the top line
       --hues LIST     the hues, 1 to 6, as degrees or hex: 22,325,262
   -s, --steps N       colours in each family, 1 to 7
+      --light LO,HI   the lightness range, darkest and lightest, 38 to 90
+      --strength N    how vivid, 60 to 100
   -f, --format FMT    json (the default), hex (a family a line) or css
   -o, --out FILE      also write the palette as JSON on every change
   -x, --xterm         snap to the xterm-256 colour a TUI draws
@@ -16,7 +18,9 @@ a family of steps for each hue.
       --nested        the caller already holds the alternate screen
 
 Enter prints the palette and exits 0. Esc or q prints nothing and exits 1.
-A usage error exits 2. With no --hues it opens on your last pick.
+A usage error exits 2. It opens on your last pick, with any of --hues,
+--steps, --light and --strength on top, so a caller can reopen the palette
+it saved.
 
 Three things to set:
 
@@ -784,9 +788,9 @@ def die(msg):
 
 
 def parse(argv):
-    opts = {"title": None, "hues": None, "steps": None, "format": "json", "out": None, "xterm": False,
+    opts = {"title": None, "hues": None, "steps": None, "light": None, "strength": None, "format": "json", "out": None, "xterm": False,
             "print": False, "where": None, "nested": False, "answer": None}
-    takes = {"-t": "title", "--title": "title", "--hues": "hues", "-s": "steps", "--steps": "steps",
+    takes = {"-t": "title", "--title": "title", "--hues": "hues", "-s": "steps", "--steps": "steps", "--light": "light", "--strength": "strength",
              "-f": "format", "--format": "format", "-o": "out", "--out": "out", "--answer": "answer"}
     flags = {"-x": "xterm", "--xterm": "xterm", "--print": "print", "--nested": "nested"}
     rest, i = [], 0
@@ -841,6 +845,15 @@ def build(opts):
         if not opts["steps"].isdigit() or not 1 <= int(opts["steps"]) <= MAX_STEPS:
             die(f"palette-pick: --steps is 1 to {MAX_STEPS}")
         s["steps"] = int(opts["steps"])
+    if opts["light"]:
+        m = re.fullmatch(r"\s*(\d+)\s*[,-]\s*(\d+)\s*", opts["light"])
+        if not m:
+            die("palette-pick: --light is two numbers, like 40,74")
+        s["lo"], s["hi"] = sorted(int(v) for v in m.groups())
+    if opts["strength"]:
+        if not opts["strength"].isdigit():
+            die("palette-pick: --strength is a number, 60 to 100")
+        s["strength"] = int(opts["strength"])
     lo = max(BAND[0], min(BAND[1], int(s["lo"])))
     hi = max(lo, min(BAND[1], int(s["hi"])))
     strength = max(STRENGTH[0], min(STRENGTH[1], int(s["strength"])))
