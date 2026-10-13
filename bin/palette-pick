@@ -20,14 +20,21 @@
 Enter prints the palette and exits 0. Esc or q prints nothing and exits 1.
 A usage error exits 2. With no --theme or --hues it opens on your last pick.
 
-Hues sit in OKLCH, so bases at one lightness look equally light. A theme
-is a handful of knobs: lightness, chroma, a stagger that lifts the first
-base and drops the last, the spread, hue drift and chroma fade of the
-variants around each base, a tint to mix toward, and lo and hi output
-levels. The gradient runs through the bases. Variants run dark to light.
+Each base starts neutral: its hue at one plain OKLCH lightness and
+chroma, so every base looks equally light and equally strong. Each
+hue row shows its neutral colour first, then its base as the sliders
+treat it, then the variants around that base.
+
+Every slider is an effect on top of neutral, and 0 means none. With all
+of them at 0 the bases are the neutral hues. light and chroma shift the
+bases. stagger lifts the first base and drops the last. spread, drift and
+fade open the variants around each base: lightness, hue turn, chroma loss
+toward the ends. tint mixes toward a colour. lift and cap pull the black
+and white points in. The gradient runs through the bases.
 
 Space shuffles the hues within the harmony and S shuffles everything.
 b steps back through shuffles. x on a hue row keeps it through shuffles.
+0 sets the slider under the cursor to 0. N sets them all to 0: neutral.
 t and m step the theme and the harmony, and 2 or 3 sets the hue count.
 < and > turn every hue at once. + and - change the gradient steps.
 # types a hex: on a hue row it takes that colour's hue, on the tint row
@@ -59,27 +66,33 @@ LAST = os.path.join(STATE, "palette-pick", "last.json")
 USER_THEMES = os.path.join(CONFIG, "palette-pick", "themes.json")
 
 BOLD, DIM, REV, RED = "\x1b[1m", "\x1b[2m", "\x1b[7m", "\x1b[31m"
-MAX_W, MIN_W, MIN_H = 76, 56, 25
+MAX_W, MIN_W, MIN_H = 76, 56, 27
 VARIANTS = 9
 CLOSE = 3.0          # steps nearer than this, in OKLab ΔE×100, read as one colour
 
 
 # --- rules ------------------------------------------------------------------
-# A theme is these knobs. L and C are OKLCH lightness and chroma, ×100.
-# stagger lifts the first base and drops the last, so the gradient also
-# runs light to dark. spread, drift and fade shape the variants: how far
-# their lightness reaches, how far their hue turns, how much chroma the
-# ends lose. mix pulls everything toward tint. lo and hi are output levels.
+# A neutral base is its hue at OKLCH lightness NEUTRAL_L and chroma
+# NEUTRAL_C, ×100. A theme is effects on top, and 0 is always none. L and
+# C shift lightness and chroma. stagger lifts the first base and drops the
+# last, so the gradient also runs light to dark. spread, drift and fade
+# open the variants: how far their lightness reaches, how far their hue
+# turns, how much chroma the ends lose. mix pulls toward tint. lift and cap
+# move the black and white points in.
+
+NEUTRAL_L, NEUTRAL_C = 70, 14
+NEUTRAL_SPREAD = 14     # neutral variants: plain shades and tints, this far in L each way
 
 THEMES = {
-    "pastel": dict(L=85, C=9,  stagger=8,  spread=10, drift=8,  fade=40, tint="#ffffff", mix=8, lo=0, hi=255),
-    "soft":   dict(L=75, C=12, stagger=6,  spread=14, drift=6,  fade=30, tint="#ffffff", mix=0, lo=0, hi=255),
-    "neon":   dict(L=72, C=30, stagger=0,  spread=16, drift=12, fade=15, tint="#ffffff", mix=0, lo=0, hi=255),
-    "jewel":  dict(L=52, C=17, stagger=6,  spread=18, drift=8,  fade=10, tint="#ffffff", mix=0, lo=0, hi=255),
-    "muted":  dict(L=63, C=7,  stagger=8,  spread=16, drift=4,  fade=20, tint="#808080", mix=6, lo=16, hi=240),
-    "earth":  dict(L=58, C=10, stagger=10, spread=18, drift=10, fade=25, tint="#8a6a48", mix=16, lo=0, hi=255),
-    "film":   dict(L=67, C=11, stagger=6,  spread=16, drift=6,  fade=20, tint="#f0e0c0", mix=8, lo=28, hi=232),
-    "dusk":   dict(L=46, C=12, stagger=8,  spread=14, drift=-8, fade=20, tint="#2a2050", mix=10, lo=0, hi=255),
+    "neutral": dict(L=0,   C=0,  stagger=0,  spread=0,  drift=0,  fade=0,  tint="#ffffff", mix=0,  lift=0,  cap=0),
+    "pastel":  dict(L=15,  C=-5, stagger=8,  spread=-4, drift=8,  fade=40, tint="#ffffff", mix=8,  lift=0,  cap=0),
+    "soft":    dict(L=5,   C=-2, stagger=6,  spread=0,  drift=6,  fade=30, tint="#ffffff", mix=0,  lift=0,  cap=0),
+    "neon":    dict(L=2,   C=16, stagger=0,  spread=2,  drift=12, fade=15, tint="#ffffff", mix=0,  lift=0,  cap=0),
+    "jewel":   dict(L=-18, C=3,  stagger=6,  spread=4,  drift=8,  fade=10, tint="#ffffff", mix=0,  lift=0,  cap=0),
+    "muted":   dict(L=-7,  C=-7, stagger=8,  spread=2,  drift=4,  fade=20, tint="#808080", mix=6,  lift=16, cap=15),
+    "earth":   dict(L=-12, C=-4, stagger=10, spread=4,  drift=10, fade=25, tint="#8a6a48", mix=16, lift=0,  cap=0),
+    "film":    dict(L=-3,  C=-3, stagger=6,  spread=2,  drift=6,  fade=20, tint="#f0e0c0", mix=8,  lift=28, cap=23),
+    "dusk":    dict(L=-24, C=-2, stagger=8,  spread=0,  drift=-8, fade=20, tint="#2a2050", mix=10, lift=0,  cap=0),
 }
 
 # Hue offsets in degrees from a root. A shuffle picks a root, a harmony
@@ -92,23 +105,30 @@ JITTER = 6
 
 # Each knob: name, row label, lowest, highest, and the variant (−1 to 1)
 # its slider previews.
-KNOBS = (("L", "light", 20, 95, 0), ("C", "chroma", 0, 37, 0), ("stagger", "stagger", -30, 30, 0),
-         ("spread", "spread", 0, 40, 1), ("drift", "drift", -45, 45, 1), ("fade", "fade", 0, 100, 1),
-         ("mix", "tint", 0, 60, 0), ("lo", "lo", 0, 120, -1), ("hi", "hi", 135, 255, 1))
+KNOBS = (("L", "light", -45, 25, 0), ("C", "chroma", -14, 23, 0), ("stagger", "stagger", -30, 30, 0),
+         ("spread", "spread", -NEUTRAL_SPREAD, 26, 1), ("drift", "drift", -45, 45, 1), ("fade", "fade", 0, 100, 1),
+         ("mix", "tint", 0, 60, 0), ("lift", "lift", 0, 120, -1), ("cap", "cap", 0, 120, 1))
 
 
 def anchors(p):
     """Each base as (L, C, h), before tint and levels."""
     k, n = p.knobs, len(p.hues)
-    return [(k["L"] + k["stagger"] * (0.5 - i / (n - 1)), k["C"], p.hues[i]) for i in range(n)]
+    return [(NEUTRAL_L + k["L"] + k["stagger"] * (0.5 - i / (n - 1)), NEUTRAL_C + k["C"], p.hues[i])
+            for i in range(n)]
 
 
 def variant(p, i, t, knobs=None):
     """Base i moved t along its ramp, from −1 (dark end) to 1 (light end)."""
     k = knobs or p.knobs
     n = len(p.hues)
-    L = k["L"] + k["stagger"] * (0.5 - i / (n - 1)) + k["spread"] * t
-    return paint(L, k["C"] * (1 - k["fade"] / 100 * abs(t)), p.hues[i] + k["drift"] * t, k, p.snap)
+    L = NEUTRAL_L + k["L"] + k["stagger"] * (0.5 - i / (n - 1)) + (NEUTRAL_SPREAD + k["spread"]) * t
+    C = (NEUTRAL_C + k["C"]) * (1 - k["fade"] / 100 * abs(t))
+    return paint(L, C, p.hues[i] + k["drift"] * t, k, p.snap)
+
+
+def neutral(p, i):
+    """Base i with no effects at all."""
+    return paint(NEUTRAL_L, NEUTRAL_C, p.hues[i], THEMES["neutral"], p.snap)
 
 
 def gradient(p):
@@ -128,7 +148,7 @@ def paint(L, C, h, k, snap=False):
     """One colour through the theme: OKLCH into gamut, tint, levels, snap."""
     r, g, b = lch_rgb(max(0, min(100, L)) / 100, max(0, C) / 100, h)
     m, t = k["mix"] / 100, rgb(k["tint"])
-    lo, hi = k["lo"], k["hi"]
+    lo, hi = k["lift"], 255 - k["cap"]
     out = tuple(round(lo + (v + (tv - v) * m) * (hi - lo) / 255) for v, tv in zip((r, g, b), t))
     return xterm(hexof(*out)) if snap else hexof(*out)
 
@@ -257,7 +277,7 @@ def all_themes():
     out = {k: dict(v) for k, v in THEMES.items()}
     for name, knobs in load_json(USER_THEMES).items():
         if isinstance(knobs, dict):
-            base = dict(THEMES["soft"])
+            base = dict(THEMES["neutral"])
             base.update({k: v for k, v in knobs.items() if k in base})
             out[name] = base
     return out
@@ -343,6 +363,7 @@ class Palette:
             "knobs": dict(self.knobs),
             "xterm": self.snap,
             "bases": bases,
+            "neutral": [neutral(self, i) for i in range(len(self.hues))],
             "gradient": grad,
             "variants": [[variant(self, i, -1 + 2 * j / (VARIANTS - 1)) for j in range(VARIANTS)]
                          for i in range(len(self.hues))],
@@ -572,6 +593,19 @@ class App:
         elif k == "x" and self.row < 3:
             p.locks ^= {self.row}
             self.say(f"hue {self.row + 1} " + ("held through shuffles" if self.row in p.locks else "free"))
+        elif k == "0":
+            if self.row < 3:
+                self.say("a hue has no zero · N sets every slider to 0")
+            else:
+                name, label = self.knob()[:2]
+                p.knobs[name] = 0
+                self.say(f"{label} is 0: no effect")
+                self.changed()
+        elif k == "N":
+            self.keep()
+            p.set_theme("neutral")
+            self.say("every slider at 0: the bases are the neutral hues")
+            self.changed()
         elif k == "8":
             p.snap = not p.snap
             self.say("snapped to xterm-256" if p.snap else "full colour")
@@ -664,7 +698,7 @@ class App:
         p, o = self.p, self.p.output()
         x, iw = 2, w - 4
         tx, tr = x + 10, iw - 10 - 6          # track start and width
-        bh = 21
+        bh = 23
         c = Canvas(w, bh + 4)
 
         c.put(0, 1, "palette-pick", BOLD)
@@ -683,33 +717,46 @@ class App:
         if p.snap:
             c.put(4, tx + tr - 3, "xterm-256", DIM)
 
+        # Each hue: its neutral colour, its base as the sliders treat it, then
+        # the variants around that base, dark to light.
+        nw, bw = 9, 9
+        vx, vw = tx + nw + bw + 2, tr - nw - bw - 2
+        c.put(6, tx, "neutral", DIM)
+        c.put(6, tx + nw + 1, "base", DIM)
+        c.put(6, vx, "variants, dark to light", DIM)
         for i in range(3):
-            y = 6 + i
+            y = 7 + i
             if i >= len(p.hues):
                 c.put(y, x, "  3", DIM)
                 c.put(y, tx, "press 3 for a third hue", DIM)
                 continue
             here = self.row == i and self.prompt is None
             lock = " x" if i in p.locks else ""
-            c.put(y, x, ("› " if here else "  ") + f"{i + 1}{lock}", BOLD if here else DIM)
-            cells(c, y, tx, tr, o["variants"][i], mark=VARIANTS // 2)
+            c.put(y, x, ("› " if here else "  ") + f"hue {i + 1}{lock}", BOLD if here else DIM)
+            n, b = o["neutral"][i], o["bases"][i]
+            c.put(y, tx, " " * nw, BG(n))
+            c.put(y, tx + nw + 1, b.center(bw), BG(b) + FG(ink(b)) + BOLD)
+            cells(c, y, vx, vw, o["variants"][i], mark=VARIANTS // 2)
             c.put(y, tx + tr + 1, f"{p.hues[i]:>3}°", BOLD if here else DIM)
 
+        c.put(11, tx, "every slider is an effect on the neutral hues · 0 is none", DIM)
         for r, (name, label, lo, hi, t) in enumerate(KNOBS):
-            y = 10 + r
+            y = 12 + r
             here = self.row == 3 + r and self.prompt is None
             c.put(y, x, ("› " if here else "  ") + label, BOLD if here else DIM)
             v = p.knobs[name]
             pos = round((v - lo) * (tr - 1) / (hi - lo))
+            zero = round(-lo * (tr - 1) / (hi - lo))
             for j in range(tr):
                 trial = dict(p.knobs, **{name: lo + (hi - lo) * j / (tr - 1)})
                 cell = variant(p, 0, t, trial)
-                c.put(y, tx + j, "┃" if j == pos else " ", BG(cell) + FG(ink(cell)))
-            c.put(y, tx + tr + 1, f"{v:>4}", BOLD if here else DIM)
+                mark = "┃" if j == pos else "╎" if j == zero else " "
+                c.put(y, tx + j, mark, BG(cell) + FG(ink(cell)) + ("" if j == pos else DIM))
+            c.put(y, tx + tr + 1, f"{v:>+4}" if v else "   0", BOLD if here else DIM)
             if name == "mix":
                 c.put(y, tx + tr + 1, "  ", BG(p.knobs["tint"]))
 
-        c.put(20, tx, f"bases ΔE {o['min_base']} apart at the nearest", DIM)
+        c.put(22, tx, f"bases ΔE {o['min_base']} apart at the nearest", DIM)
         self.draw_footer(c, w, bh + 1)
         self.out(c.centred(tw, th).render())
 
@@ -726,7 +773,7 @@ class App:
             c.put(y, 1, self.msg[0], self.msg[1], limit=w - 2)
             y += 1
         hints = ["enter done", "esc cancel", "space shuffle", "S all", "b back", "t theme",
-                 "m harmony", "2/3 hues", "x hold", "<> turn", "+- steps", "8 xterm",
+                 "m harmony", "0 zero", "N neutral", "2/3 hues", "x hold", "<> turn", "+- steps", "8 xterm",
                  "# hex", "w save", "c copy", "r reset", "⇧ ×10"]
         line = ""
         for hint in hints:
@@ -878,11 +925,11 @@ def build(opts):
     """The palette to open on: the options given, over your last pick."""
     themes = all_themes()
     last = {} if opts["theme"] or opts["hues"] else load_json(LAST)
-    theme = opts["theme"] or last.get("theme", "soft").rstrip("*")
+    theme = opts["theme"] or last.get("theme", "neutral").rstrip("*")
     if theme not in themes:
         if opts["theme"]:
             die(f"palette-pick: no theme {theme} · try --themes")
-        theme = "soft"
+        theme = "neutral"
     hues = last.get("hues") or [230, 160, 90]
     if opts["hues"]:
         hues = []
