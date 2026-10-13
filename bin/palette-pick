@@ -222,13 +222,17 @@ def sibling_turn(target, C):
 
 
 def judge(fams):
-    """How the families read: (siblings' nearest ΔE, families' nearest ΔE, good).
-    Good: siblings tell apart, and the nearest two families sit further apart
-    than the nearest two siblings."""
-    sib = [delta(a, b) for f in fams for a, b in zip(f, f[1:])]
-    cross = min((delta(a, b) for i, f in enumerate(fams) for g in fams[i + 1:] for a in f for b in g), default=99)
-    near = min(sib) if sib else 99
-    return near, cross, near >= CLOSE and cross >= max(2 * CLOSE, 1.25 * near)
+    """How the families read: (siblings' nearest ΔE, families' nearest ΔE,
+    good, the closest sibling pair, the closest pair across families). A pair
+    is (ΔE, hex, hex, family, family). Good: siblings tell apart, and no two
+    families come as close as two siblings do."""
+    sibs = [(delta(a, b), a, b, i, i) for i, f in enumerate(fams) for a, b in zip(f, f[1:])]
+    cross = [(delta(a, b), a, b, i, i + 1 + j) for i, f in enumerate(fams) for j, g in enumerate(fams[i + 1:])
+             for a in f for b in g]
+    sib, far = min(sibs, default=None), min(cross, default=None)
+    near, apart = sib[0] if sib else 99, far[0] if far else 99
+    good = near >= CLOSE and apart >= max(2 * CLOSE, 1.25 * near if sib else 0)
+    return near, apart, good, sib, far
 
 
 def gradient(p):
@@ -468,7 +472,7 @@ class Palette:
                 self.lc[i] = [NEUTRAL_L, NEUTRAL_C]
         for _ in range(tries):
             name = self.shuffle_once(rng)
-            near, cross, good = judge(families(self))
+            near, cross, good = judge(families(self))[:3]
             if good:
                 return name
             score = min(near / CLOSE, cross / (2 * CLOSE))
@@ -498,7 +502,7 @@ class Palette:
         grad = gradient(self)
         bases = [variant(self, i, 0) for i in range(len(self.hues))]
         fams = families(self)
-        near, cross, good = judge(fams)
+        near, cross, good, sib, far = judge(fams)
         return {
             "families": fams,
             "palette": [c for f in fams for c in f],
@@ -507,6 +511,8 @@ class Palette:
             "min_sibling": round(near, 1),
             "min_family": round(cross, 1),
             "clear": good,
+            "closest_siblings": list(sib[1:3]) if sib else None,
+            "closest_across": list(far[1:3]) if far else None,
             "theme": self.theme + ("*" if self.tweaked else ""),
             "harmony": self.harmony,
             "hues": list(self.hues),
@@ -939,11 +945,29 @@ class App:
             a, b = tx + i * span // n + i, tx + (i + 1) * span // n + i
             cells(c, 2, a, b - a, f, text=True)
             cells(c, 3, a, b - a, f)
-        near, cross = o["min_sibling"], o["min_family"]
-        verdict = "clear" if o["clear"] else "siblings blur" if near < CLOSE else "families too close"
-        line = (f"siblings ΔE ≥ {near} · " if m > 1 else "") + \
-            (f"families ΔE ≥ {cross} · " if n > 1 else "") + verdict
-        c.put(4, tx, line, DIM if o["clear"] else RED, limit=tr + 6)
+        # One plain sentence on the closest call, with the two colours shown.
+        near, cross, good, sib, far = judge(fams)
+        if good:
+            pair, what, fix = far or sib, "every colour tells apart", ""
+            if far:
+                what += " · closest across hues:"
+        elif near < CLOSE and judge(family_set(p, None))[2]:
+            pair, what, fix = sib, f"hue {sib[3] + 1}'s siblings look alike:", "raise siblings or chroma"
+        else:
+            # Families crowd each other, and reining the siblings in did not
+            # help: name the two hues that crowd.
+            far = far or sib
+            far = min(((delta(neutral(p, i), neutral(p, j)), neutral(p, i), neutral(p, j), i, j)
+                       for i in range(n) for j in range(i + 1, n)), default=far)
+            pair, what = far, f"hue {far[3] + 1} and hue {far[4] + 1} come too close:"
+            fix = "turn one away"
+        c.put(4, tx, what, DIM if good else RED)
+        cx = tx + len(what) + 1
+        if pair and (far or not good):
+            for v in pair[1:3]:
+                c.put(4, cx, "  ", BG(v))
+                cx += 3
+            c.put(4, cx, fix, DIM if good else RED, limit=tx + tr + 6 - cx)
 
         # 1: the hues, each as picked, then the family and shades it makes.
         y = 6
