@@ -1,12 +1,13 @@
 # The colour pickers
 
-Three terminal pickers, each one script you can run raw or as a TUI. Any program can call them. awday is the worked example; it is private for now.
+Two terminal pickers, each one script you can run raw or as a TUI. Any program can call them. awday is the worked example; it is private for now.
 
 | Tool | Picks | Reach for it when |
 | --- | --- | --- |
 | `color-pick` | one colour | a single colour, from a grid, sliders or swatches |
 | `hue-pick` | a family of shades per hue, from a fixed list of hues | categories that must stay apart, in a 256-colour TUI or in full colour |
-| `palette-pick` | a palette from free hues, a lightness range and a strength | full freedom over hue and range; `hue-pick` is its stricter successor |
+
+`hue-pick` replaced `palette-pick`, which is removed.
 
 ## Two ways to run them
 
@@ -112,7 +113,7 @@ Outside Ghostty, end curses, run the picker in the same terminal without `--spli
 ## Where things are
 
 ```
-bin/color-pick  bin/hue-pick  bin/palette-pick
+bin/color-pick  bin/hue-pick
 lib/hue_rules.py                 the --assign rules, shared with callers
 config/hue-pick/hues.json        the hues
 docs/pickers.md                  this file
