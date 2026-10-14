@@ -2,6 +2,9 @@
 """palette-pick — pick a few hues, one lightness range and a strength; get
 a family of steps for each hue.
 
+For categories that must stay apart, see hue-pick: fixed hue families with
+hand-checked xterm-256 steps. docs/pickers.md covers both, raw and as a TUI.
+
   palette-pick [options]
 
   -t, --title TEXT    say what the palette is for, on the top line
