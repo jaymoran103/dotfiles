@@ -16,6 +16,7 @@ Plus cool stuff I built.
 | `bin/ghostty-theme-edit` | `~/.local/bin/ghostty-theme-edit` | Theme editor — see below |
 | `bin/icons-batch` | `~/.local/bin/icons-batch` | One DiceBear blob PNG per seed, into `icons-<timestamp>/` |
 | `bin/color-pick` | `~/.local/bin/color-pick` | Colour picker any script or TUI can call — see below |
+| `bin/hue-pick` | `~/.local/bin/hue-pick` | Pick a few hues, get a family of steps for each; hues live in `config/hue-pick/hues.json` · `--help` |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
 
