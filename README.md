@@ -17,7 +17,6 @@ Plus cool stuff I built.
 | `bin/icons-batch` | `~/.local/bin/icons-batch` | One DiceBear blob PNG per seed, into `icons-<timestamp>/` |
 | `bin/color-pick` | `~/.local/bin/color-pick` | Colour picker any script or TUI can call — see below |
 | `bin/hue-pick` | `~/.local/bin/hue-pick` | Pick hue families for categories, raw or as a TUI; hues in `config/hue-pick/hues.json` · see `docs/pickers.md` |
-| `bin/palette-pick` | `~/.local/bin/palette-pick` | Free-form palette picker: hues, one lightness range, a strength, presets · see `docs/pickers.md` |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
 
