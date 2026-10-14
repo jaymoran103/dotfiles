@@ -36,12 +36,14 @@ Two modes, because a terminal's 256 colours are not full colour:
               strength (OKLCH), so steps line up in lightness across hues.
 
 --assign is for a caller with named groups, like awforge. Each group picks
-one hue, and several may share one. A group's own colour is its hue's middle
-step; its items take the steps in middle-out order (ITEM_ORDER), repeating
-when there are more items than steps. The picker draws every group with the
+one hue, and several may share one. A group's own colour is one of its hue's
+five steps: the middle for the first group on a hue, the next of ITEM_ORDER for
+the next, or one set by hand with [ ]. Its items take the steps outward from
+it, lighter first, repeating when there are more items than steps. The picker draws every group with the
 exact colours the caller will draw, so what you see is what you get. JSON in:
-  {"groups": [{"key": "espo-engineering", "label": "eng", "hue": "red", "n": 8}], "steps": 3}
-JSON out: {"assign": {key: hue}, "steps": n, "colours": {key: [group colour, item colours...]}}.
+  {"groups": [{"key": "espo-engineering", "label": "eng", "hue": "red", "step": null, "n": 8}], "steps": 3}
+JSON out: {"assign": {key: hue}, "step": {key: step}, "fixed": {key: step set by hand},
+  "steps": n, "families": [each hue used, five steps], "colours": {key: [group colour, items...]}}.
 It is xterm-256 only, as a curses TUI draws.
 
 The hues live in hues.json: ~/.config/hue-pick/hues.json if it exists,
@@ -101,14 +103,36 @@ def spread(n, of):
     return [of // 2] if n == 1 else [round(j * (of - 1) / (n - 1)) for j in range(n)]
 
 
-ITEM_ORDER = (2, 3, 1, 4, 0)     # middle-out over the five xterm steps; awforge keeps the same order
+# How --assign colours a group and its items. awday_hues.py in focusline keeps the same rules.
+ITEM_ORDER = (2, 3, 1, 4, 0)     # middle out over the five xterm steps
 
 
-def item_colours(h, steps, n):
-    """A group's colour, then its n items' colours: the first `steps` of the five
-    hand-checked xterm steps in middle-out order, repeating."""
-    use = [h["xterm"][i] for i in ITEM_ORDER[:max(1, min(steps, XTERM_STEPS))]]
-    return [h["xterm"][ITEM_ORDER[0]]] + [use[j % len(use)] for j in range(n)]
+def outward(base, n=XTERM_STEPS):
+    """Steps from base outward, lighter first: 2 gives 2, 3, 1, 4, 0."""
+    seq, d = [base], 1
+    while len(seq) < n:
+        seq += [b for b in (base + d, base - d) if 0 <= b < n]
+        d += 1
+    return seq[:n]
+
+
+def group_steps(pairs, fixed):
+    """Each group's own step. pairs is [(key, hue)] in order; fixed holds steps
+    picked by hand. The rest: the first group on a hue takes its middle, the
+    next sharing it the next step of ITEM_ORDER, so groups on one hue differ."""
+    seen, out = {}, {}
+    for key, hue in pairs:
+        k = seen.get(hue, 0)
+        out[key] = fixed[key] if fixed.get(key) is not None else ITEM_ORDER[k % XTERM_STEPS]
+        seen[hue] = k + 1
+    return out
+
+
+def item_colours(h, step, steps, n):
+    """A group's colour, its own step, then its n items' colours: the first `steps`
+    steps outward from it, repeating."""
+    use = [h["xterm"][i] for i in outward(step)[:max(1, min(steps, XTERM_STEPS))]]
+    return [h["xterm"][step]] + [use[j % len(use)] for j in range(n)]
 
 
 def family(h, mode, steps, strength):
@@ -617,7 +641,8 @@ class AssignApp(App):
         self.tty = os.open("/dev/tty", os.O_RDWR)
         self.all = hues
         names = [h["name"] for h in hues]
-        self.groups = [dict(g, hue=g.get("hue") if g.get("hue") in names else names[0]) for g in spec["groups"]]
+        self.groups = [dict(g, hue=g.get("hue") if g.get("hue") in names else names[0],
+                            step=g.get("step") if g.get("step") in range(XTERM_STEPS) else None) for g in spec["groups"]]
         self.steps = max(1, min(XTERM_STEPS, int(spec.get("steps") or 3)))
         self.start = self.state()
         self.title, self.out_file, self.nested = title, out_file, nested
@@ -627,21 +652,29 @@ class AssignApp(App):
         return next(h for h in self.all if h["name"] == name)
 
     def state(self):
-        return dict(hues=[g["hue"] for g in self.groups], steps=self.steps)
+        return dict(hues=[g["hue"] for g in self.groups], fixed=[g.get("step") for g in self.groups], steps=self.steps)
 
     def restore(self, s):
-        for g, h in zip(self.groups, s["hues"]):
-            g["hue"] = h
+        for g, h, f in zip(self.groups, s["hues"], s.get("fixed") or [None] * len(self.groups)):
+            g["hue"], g["step"] = h, f
         self.steps = s["steps"]
+
+    def steps_now(self):
+        return group_steps([(g["key"], g["hue"]) for g in self.groups], {g["key"]: g.get("step") for g in self.groups})
+
+    def colours(self, g, at):
+        return item_colours(self.by_name(g["hue"]), at[g["key"]], self.steps, g.get("n", 0))
 
     def keep(self):
         self.back = (self.back + [self.state()])[-50:]
 
     def output(self):
+        at = self.steps_now()
         return {"assign": {g["key"]: g["hue"] for g in self.groups}, "steps": self.steps, "mode": "xterm",
+                "step": at, "fixed": {g["key"]: g["step"] for g in self.groups if g.get("step") is not None},
                 "hues": [g["hue"] for g in self.groups],
-                "colours": {g["key"]: item_colours(self.by_name(g["hue"]), self.steps, g.get("n", 0))
-                            for g in self.groups}}
+                "families": [self.by_name(h)["xterm"] for h in dict.fromkeys(g["hue"] for g in self.groups)],
+                "colours": {g["key"]: self.colours(g, at) for g in self.groups}}
 
     def text(self):
         return json.dumps(self.output(), indent=2)
@@ -683,11 +716,22 @@ class AssignApp(App):
             g = self.groups[here[1]]
             g["hue"] = names[(names.index(g["hue"]) + (1 if k.endswith("right") else -1)) % len(names)]
             self.changed()
+        elif k in ("[", "]") and here[0] == "group":
+            self.keep()
+            g = self.groups[here[1]]
+            now = self.steps_now()[g["key"]]
+            g["step"] = max(0, min(XTERM_STEPS - 1, now + (1 if k == "]" else -1)))
+            self.say("%s: step %d of 5, by hand · 0 puts it back to auto" % (g.get("label") or g["key"], g["step"] + 1))
+            self.changed()
+        elif k == "0" and here[0] == "group":
+            self.keep()
+            self.groups[here[1]]["step"] = None
+            self.changed()
         elif k in ("+", "=", "-", "_") or (k in ("left", "right", "S-left", "S-right") and here[0] == "steps"):
             self.keep()
             self.steps = max(1, min(XTERM_STEPS, self.steps + (1 if k in ("+", "=", "right", "S-right") else -1)))
             self.changed()
-        elif k in "12345" and len(k) == 1:
+        elif len(k) == 1 and k in "12345":
             self.keep()
             self.steps = int(k)
             self.changed()
@@ -729,16 +773,18 @@ class AssignApp(App):
 
         # Every group, drawn with the colours its caller will draw: its own, then each item's.
         lw = min(18, max([len(g.get("label") or g["key"]) for g in self.groups] + [6]))
-        hx, sx = x + 2 + lw + 1, x + 2 + lw + 1 + 8
+        hx, sx = x + 2 + lw + 1, x + 2 + lw + 1 + 9
         c.put(2, x, "groups", BOLD)
         c.put(2, sx, "← → its hue · groups may share one", DIM, limit=w - 2 - sx)
         y = 2
+        at = self.steps_now()
         for i, g in enumerate(self.groups):
             y += 1
             on = here == ("group", i)
-            col = item_colours(self.by_name(g["hue"]), self.steps, g.get("n", 0))
+            col = self.colours(g, at)
             c.put(y, x, ("› " if on else "  ") + (g.get("label") or g["key"])[:lw], BOLD if on else "")
-            c.put(y, hx, g["hue"], BOLD if on else DIM)
+            c.put(y, hx, "%-6s%s%d" % (g["hue"][:6], "·" if g.get("step") is None else "=", at[g["key"]] + 1),
+                  BOLD if on else DIM)
             c.put(y, sx, "   ", BG(col[0]))
             room = (w - 3 - (sx + 4)) // 2
             items = col[1:]
@@ -760,7 +806,7 @@ class AssignApp(App):
         c.put(y, x, "hues", DIM)
         cw = max(5, (w - 2 - hx) // len(self.all))
         for j, h in enumerate(self.all):
-            use = item_colours(h, self.steps, self.steps)[1:]
+            use = item_colours(h, ITEM_ORDER[0], self.steps, self.steps)[1:]
             for k, v in enumerate(use):
                 c.put(y, hx + j * cw + k * max(1, (cw - 1) // len(use)), " " * max(1, (cw - 1) // len(use)), BG(v))
             c.put(y + 1, hx + j * cw, h["name"][:cw - 1], BOLD if any(g["hue"] == h["name"] for g in self.groups) else DIM)
@@ -768,7 +814,7 @@ class AssignApp(App):
         y += 3
         shared = [h["name"] for h in self.all if sum(g["hue"] == h["name"] for g in self.groups) > 1]
         tip = ("shared: " + ", ".join(shared)) if shared and here[0] == "group" else \
-            "← → its hue · s spreads hues round the wheel" if here[0] == "group" else "← → or 1-5 · items take these steps"
+            "← → its hue · [ ] its own step, 0 auto · s spreads hues" if here[0] == "group" else "← → or 1-5 · items take these steps"
         c.put(y, x, tip, DIM, limit=iw)
         self.draw_footer(c, w, bh + 1)
         self.out(c.centred(tw, th).render())
@@ -778,7 +824,7 @@ class AssignApp(App):
             c.put(y, 1, self.msg[0], self.msg[1], limit=w - 2)
             y += 1
         line = ""
-        for hint in ("enter done", "esc cancel", "↑↓ group", "← → hue", "1-5 steps", "s spread", "b back", "c copy"):
+        for hint in ("enter done", "esc cancel", "↑↓ group", "← → hue", "[ ] step", "1-5 item steps", "s spread", "b back", "c copy"):
             if len(line) + len(hint) + 3 > w - 2:
                 c.put(y, 1, line, DIM)
                 y, line = y + 1, ""
@@ -1005,8 +1051,8 @@ def main():
             spec["steps"] = opts["steps"]
         app = AssignApp.__new__(AssignApp)
         if opts["print"]:
-            app.all, app.groups, app.steps = hues, [dict(g, hue=g.get("hue") or hues[0]["name"]) for g in spec["groups"]], \
-                max(1, min(XTERM_STEPS, int(spec.get("steps") or 3)))
+            app.all, app.groups, app.steps = hues, [dict(g, hue=g.get("hue") or hues[0]["name"], step=g.get("step"))
+                                                    for g in spec["groups"]], max(1, min(XTERM_STEPS, int(spec.get("steps") or 3)))
             print(app.text())
             return
         signal.signal(signal.SIGHUP, lambda *_: sys.exit(1))
