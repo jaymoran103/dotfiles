@@ -77,6 +77,9 @@ unset _p
 
 # --- Prompt -------------------------------------------------------------
 command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"
+# Per-project and global prompt picks from `starship-preset`.
+[[ -r "$HOME/.config/starship/starship-preset.zsh" ]] \
+  && source "$HOME/.config/starship/starship-preset.zsh"
 
 # --- Environment --------------------------------------------------------
 # Prefer VS Code if present (macOS + Linux); else fall back to a TTY editor so
