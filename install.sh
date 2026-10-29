@@ -64,6 +64,8 @@ link_configs() {
   backup_and_link "$DOTFILES/bin/icons-batch"       "$HOME/.local/bin/icons-batch"
   backup_and_link "$DOTFILES/bin/color-pick"        "$HOME/.local/bin/color-pick"
   backup_and_link "$DOTFILES/bin/hue-pick"          "$HOME/.local/bin/hue-pick"
+  backup_and_link "$DOTFILES/bin/siesta"            "$HOME/.local/bin/siesta"
+  backup_and_link "$DOTFILES/bin/siesta-config"     "$HOME/.local/bin/siesta-config"
   backup_and_link "$DOTFILES/bin/forgej"            "$HOME/.local/bin/forgej"
   # Claude's allow rule runs the launcher from this path.
   mkdir -p "$HOME/forge-data/bin"
