@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""siesta — waves on a beach, one slow frame at a time.
+
+  siesta [options]        watch the waves
+  siesta-config           change colours, pace and tide, with a live preview
+                          (also `siesta config`)
+
+  -p, --pace SECONDS  time on each frame, 0.1 to 3 (default: the config's, else 0.6)
+  -t, --tide PERCENT  how far up the sand the waves run, 30 to 100
+      --print N       print frame N of the loop with colour, no screen
+      --size WxH      the size --print draws at (default: the terminal's)
+
+Space pauses, c opens siesta-config, q or esc leaves.
+
+Colours come from hue-pick. siesta-config opens `hue-pick --assign` with five
+groups: sky (then clouds), sun, sea (then shallows, then deep), foam and sand
+(then wet sand). The pick is saved to ~/.config/siesta/config.json, and a
+running siesta picks up each save. Steps follow lib/hue_rules.py, so what
+hue-pick shows is what siesta draws.
+
+siesta-config keys: ↑ ↓ move, ← → change, enter on colours opens hue-pick
+(in a Ghostty split if it can, so the preview recolours live), ⌫ twice resets,
+esc closes. Every change saves as you make it.
+"""
+
+import json, math, os, select, shutil, subprocess, sys, tempfile, termios, time, tty
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
+try:
+    import hue_rules as R
+except ImportError:
+    R = None
+
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "siesta", "config.json")
+FRAMES = 16                      # one wave per loop
+STEPS = 3                        # shades an item may take, as hue-pick --assign counts them
+BREAK = 0.42                     # where in the loop the crest reaches the sand
+PACE, TIDE = (0.1, 3.0), (30, 100)
+
+# hue-pick --assign groups. Items are by rank: sky's is clouds, sea's are
+# shallows then deep, sand's is wet sand.
+GROUPS = [
+    {"key": "sky",  "label": "sky · clouds",          "hue": "sky",    "step": 3, "items": [4]},
+    {"key": "sun",  "label": "sun",                   "hue": "gold",   "step": 3, "items": []},
+    {"key": "sea",  "label": "sea · shallows · deep", "hue": "teal",   "step": 1, "items": [2, 0]},
+    {"key": "foam", "label": "foam",                  "hue": "sky",    "step": 4, "items": []},
+    {"key": "sand", "label": "sand · wet sand",       "hue": "orange", "step": 4, "items": [3]},
+]
+FALLBACK = {"sky": ["#5fd7ff", "#afffff"], "sun": ["#ffd700"], "sea": ["#008787", "#00afaf", "#005f5f"],
+            "foam": ["#afffff"], "sand": ["#ffd7af", "#ffaf5f"]}
+BOLD = {"sun", "foam"}
+
+SUN = ([r" \ | / ", r"-- O --", r" / | \ "],
+       [r"  \ /  ", r" - O - ", r"  / \  "])
+CLOUDS = ((0.12, 0, ["   .--.   ", ".-(    ). ", "(___.__)_)"]),
+          (0.58, 1, [" .-. ", "(___)"]))
+
+
+# --- config ------------------------------------------------------------------
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def defaults():
+    return {"pace": 0.6, "tide": 70, "groups": [dict(g, items=list(g["items"])) for g in GROUPS], "colours": None}
+
+
+def load():
+    cfg = defaults()
+    try:
+        with open(CONFIG) as fh:
+            saved = json.load(fh)
+    except (OSError, ValueError):
+        return cfg
+    if isinstance(saved.get("pace"), (int, float)):
+        cfg["pace"] = round(clamp(saved["pace"], *PACE), 1)
+    if isinstance(saved.get("tide"), (int, float)):
+        cfg["tide"] = int(clamp(saved["tide"], *TIDE))
+    by = {g.get("key"): g for g in saved.get("groups") or [] if isinstance(g, dict)}
+    for g in cfg["groups"]:
+        g.update({k: by[g["key"]][k] for k in ("hue", "step", "items") if k in by.get(g["key"], {})})
+    if isinstance(saved.get("colours"), dict):
+        cfg["colours"] = saved["colours"]
+    return cfg
+
+
+def save(cfg):
+    data = {"pace": cfg["pace"], "tide": cfg["tide"],
+            "groups": [{k: g[k] for k in ("key", "hue", "step", "items")} for g in cfg["groups"]],
+            "colours": colours(cfg)}
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    tmp = CONFIG + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, CONFIG)
+
+
+def colours(cfg):
+    """{group: [its colour, then its items']}, by the rules hue-pick draws with.
+    Without hue_rules or hues.json, the colours saved last, else the defaults."""
+    try:
+        hues = {h["name"]: h["xterm"] for h in R.load_hues()}
+        gs = cfg["groups"]
+        at = R.group_steps([(g["key"], g["hue"]) for g in gs], {g["key"]: g.get("step") for g in gs})
+        return {g["key"]: R.item_colours(hues[g["hue"]], at[g["key"]], STEPS, g["items"]) for g in gs}
+    except Exception:
+        return cfg.get("colours") or FALLBACK
+
+
+def roles(c):
+    def get(key, i):
+        xs = c.get(key) or FALLBACK[key]
+        return xs[min(i, len(xs) - 1)]
+    return {"sky": get("sky", 0), "cloud": get("sky", 1), "sun": get("sun", 0),
+            "sea": get("sea", 0), "shallow": get("sea", 1), "deep": get("sea", 2),
+            "foam": get("foam", 0), "sand": get("sand", 0), "wet": get("sand", 1)}
+
+
+# --- the scene ---------------------------------------------------------------
+
+def grain(x, y):
+    """A fixed 0-1 value per cell, so sand keeps its texture between frames."""
+    n = (x * 374761393 + y * 668265263) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    return (n ^ (n >> 16)) / 0xFFFFFFFF
+
+
+def runup(p):
+    """How far up its reach the water is, 0 to 1: a quick rush, a slow slide back."""
+    q = (p - BREAK) % 1
+    if q < 0.2:
+        return math.sin(q / 0.2 * math.pi / 2)
+    return 0.5 + 0.5 * math.cos((q - 0.2) / 0.8 * math.pi)
+
+
+def scene(w, h, f, tick, tide):
+    """Frame f of the loop as rows of (char, role). tick drifts clouds and birds."""
+    g = [[(" ", None)] * w for _ in range(h)]
+
+    def put(x, y, s, role):
+        for i, ch in enumerate(s):
+            if ch != " " and 0 <= x + i < w and 0 <= y < h:
+                g[y][x + i] = (ch, role)
+
+    p, tau = f / FRAMES, 2 * math.pi
+    sky = max(3, round(h * 0.34))
+    sea = max(3, round(h * 0.28))
+    beach = h - sky - sea
+
+    # sky: sun, clouds drifting left, two birds drifting right
+    for i, line in enumerate(SUN[(f // 4) % 2]):
+        put(w - 13, (1 if sky > 4 else 0) + i, line, "sun")
+    for x0, y, shape in CLOUDS:
+        x = (int(x0 * (w + 14)) - tick // 3) % (w + 14) - 12
+        for i, line in enumerate(shape):
+            if y + i < sky - 1:
+                put(x, y + i, line, "cloud")
+    bx = (int(0.35 * w) + tick // 2) % (w + 6) - 3
+    put(bx, 1 + (tick // 3) % 2, "v", "sky")
+    put(bx + 3, 2 - (tick // 3) % 2, "v", "sky")
+
+    # sea: swells rolling in, and one crest a loop
+    for r in range(sea):
+        d = r / (sea - 1)
+        role = "deep" if d < 0.34 else "sea" if d < 0.75 else "shallow"
+        for x in range(w):
+            v = 0.55 * math.sin(0.9 * r - 2 * tau * p) + 0.45 * math.sin(x * (0.16 + 0.22 * d) + r * 2.3 + tau * p)
+            ch = "~" if v > 0.5 else "-" if v > 0.1 - 0.4 * d else " "
+            if ch != " ":
+                g[sky + r][x] = (ch, role)
+    if p < BREAK:
+        y = sky + round(p / BREAK * (sea - 1))
+        for x in range(w):
+            if math.sin(x * 0.13 + 1.7) > -0.6:
+                g[y][x] = ("^" if grain(x, f) < 0.2 else "~", "foam")
+
+    # sand: water runs up past the wet line, then slides back
+    run, rushing = runup(p), (p - BREAK) % 1 < 0.2
+    for x in range(w):
+        reach = beach * 0.85 * tide / 100 * (0.74 + 0.16 * math.sin(x * 0.071 + 0.6) + 0.1 * math.sin(x * 0.19 + 2.2))
+        edge = reach * run
+        for b in range(beach):
+            y, n = sky + sea + b, grain(x, b)
+            if b + 1 < edge:
+                v = math.sin(x * 0.5 + b * 2.1 - tau * p)
+                g[y][x] = ("~" if v > 0.3 else "-" if v > -0.4 else " ", "shallow")
+            elif b < edge and edge > 0.2:
+                g[y][x] = (("o" if n < 0.3 else "°" if n < 0.6 else ".") if rushing else ("." if n < 0.5 else ","), "foam")
+            elif b < reach * 0.92:
+                g[y][x] = ("," if n < 0.25 else "." if n < 0.55 else " ", "wet")
+            else:
+                g[y][x] = ("." if n < 0.22 else ":" if n < 0.3 else " ", "sand")
+    if beach > 3:
+        put(int(w * 0.72), sky + sea + beach - 2, "*", "sun")
+    return g
+
+
+def paint(rows, pal, x0=0, y0=0, home=True):
+    out, sgr = [], {}
+    for role, hexc in pal.items():
+        r, gr, b = (int(hexc[i:i + 2], 16) for i in (1, 3, 5))
+        sgr[role] = "\x1b[0;%s38;2;%d;%d;%dm" % ("1;" if role in BOLD else "", r, gr, b)
+    for i, row in enumerate(rows):
+        if home:
+            out.append("\x1b[%d;%dH" % (y0 + i + 1, x0 + 1))
+        cur = 0
+        for ch, role in row:
+            if role != cur:
+                out.append(sgr.get(role, "\x1b[0m"))
+                cur = role
+            out.append(ch)
+        out.append("\x1b[0m" + ("" if home else "\n"))
+    return "".join(out)
+
+
+# --- terminal ------------------------------------------------------------------
+
+KEYS = {"\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
+        "\x1bOA": "up", "\x1bOB": "down", "\x1bOC": "right", "\x1bOD": "left"}
+
+
+class Term:
+    def __init__(self):
+        self.fd = os.open("/dev/tty", os.O_RDWR)
+        self.old = termios.tcgetattr(self.fd)
+
+    def __enter__(self):
+        self.resume()
+        self.write("\x1b[?1049h\x1b[2J")
+        return self
+
+    def __exit__(self, *exc):
+        self.write("\x1b[0m\x1b[?1049l")
+        self.suspend()
+        os.close(self.fd)
+
+    def resume(self):
+        tty.setcbreak(self.fd)
+        self.write("\x1b[?25l\x1b[?7l")
+
+    def suspend(self):
+        self.write("\x1b[?7h\x1b[?25h")
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def write(self, s):
+        os.write(self.fd, s.encode())
+
+    def size(self):
+        s = os.get_terminal_size(self.fd)
+        return s.columns, s.lines
+
+    def keys(self, timeout):
+        if not select.select([self.fd], [], [], max(0, timeout))[0]:
+            return []
+        data, out, i = os.read(self.fd, 64).decode(errors="ignore"), [], 0
+        while i < len(data):
+            seq = data[i:i + 3]
+            if seq in KEYS:
+                out.append(KEYS[seq])
+                i += 3
+            elif data[i] == "\x1b":
+                out.append("esc")
+                i += 1 + (data[i + 1:i + 2] == "[") * 2   # an unknown sequence: skip its start
+            else:
+                out.append(data[i])
+                i += 1
+        return out
+
+
+def mtime():
+    try:
+        return os.stat(CONFIG).st_mtime
+    except OSError:
+        return None
+
+
+# --- siesta ------------------------------------------------------------------
+
+def watch(pace, tide):
+    with Term() as t:
+        f = tick = 0
+        paused, seen, last, cfg = False, 0, None, None
+        while True:
+            if mtime() != seen or cfg is None:
+                seen, cfg = mtime(), load()
+                pal = roles(colours(cfg))
+            w, h = t.size()
+            if (w, h) != last:
+                t.write("\x1b[0m\x1b[2J")
+                last = (w, h)
+            t.write(paint(scene(w, h - 1, f, tick, tide or cfg["tide"]), pal))
+            t.write("\x1b[%d;1H\x1b[0;2m%s\x1b[K\x1b[0m" % (h, "  paused · space goes on" if paused else ""))
+            end = time.time() + (pace or cfg["pace"])
+            while time.time() < end:
+                for k in t.keys(end - time.time()):
+                    if k in ("q", "esc", "\x03"):
+                        return 0
+                    if k == " ":
+                        paused = not paused
+                        end = 0
+                    if k == "c":
+                        t.suspend()
+                        t.write("\x1b[?1049l")
+                        subprocess.run([sys.executable, os.path.realpath(__file__), "config"])
+                        t.write("\x1b[?1049h\x1b[2J")
+                        t.resume()
+                        last, end = None, 0
+            if not paused:
+                f, tick = (f + 1) % FRAMES, tick + 1
+
+
+# --- siesta-config -------------------------------------------------------------
+
+def meter(v, lo, hi, width, colour):
+    """A plain meter: a 0 tick, a fill up to the value, a knob."""
+    n = round(v / hi * (width - 1))
+    return "\x1b[2m0┤\x1b[0m%s%s●\x1b[0;2m%s\x1b[0m" % (colour, "━" * n, "─" * (width - 1 - n))
+
+
+def swatches(c):
+    out = []
+    for g in GROUPS:
+        blocks = "".join("\x1b[38;2;%d;%d;%dm██" % tuple(int(x[i:i + 2], 16) for i in (1, 3, 5)) for x in c.get(g["key"]) or [])
+        out.append("\x1b[0;2m%s\x1b[0m %s\x1b[0m" % (g["key"], blocks))
+    return "  ".join(out)
+
+
+def hue_pick():
+    mine = os.path.join(HERE, "hue-pick")
+    return mine if os.path.exists(mine) else shutil.which("hue-pick")
+
+
+class Config:
+    ROWS = ("colours", "pace", "tide")
+
+    def __init__(self, t):
+        self.t, self.cfg = t, load()
+        self.focus, self.armed, self.note = 0, False, ""
+        self.proc = self.live = self.live_colours = None
+        self.f = self.tick = 0
+
+    def changed(self):
+        save(self.cfg)
+        self.note = "✓ saved"
+
+    def nudge(self, d):
+        row = self.ROWS[self.focus]
+        if row == "pace":
+            self.cfg["pace"] = round(clamp(self.cfg["pace"] + 0.1 * d, *PACE), 1)
+        elif row == "tide":
+            self.cfg["tide"] = int(clamp(self.cfg["tide"] + 5 * d, *TIDE))
+        else:
+            return
+        self.changed()
+
+    def spec(self):
+        return json.dumps({"groups": [dict(g, n=len(g["items"])) for g in self.cfg["groups"]], "steps": STEPS})
+
+    def pick(self):
+        exe = hue_pick()
+        if not exe:
+            self.note = "hue-pick is not on PATH"
+            return
+        self.live = os.path.join(tempfile.mkdtemp(prefix="siesta."), "live")
+        args = [sys.executable, exe, "--assign", self.spec(), "-t", "siesta: colours", "-o", self.live]
+        if os.environ.get("TERM_PROGRAM") == "ghostty" and sys.platform == "darwin":
+            self.proc = subprocess.Popen(args + ["--split"], stdout=subprocess.PIPE, text=True)
+            self.note = "hue-pick is open in a split · the preview follows it"
+            return
+        self.t.suspend()
+        r = subprocess.run(args + ["--nested"], stdout=subprocess.PIPE, text=True)
+        self.t.resume()
+        self.t.write("\x1b[0m\x1b[2J")
+        self.took(r.returncode, r.stdout)
+
+    def poll(self):
+        """While hue-pick runs in a split: follow its live file, then take its answer."""
+        if not self.proc:
+            return
+        try:
+            with open(self.live) as fh:
+                self.live_colours = json.load(fh).get("colours")
+        except (OSError, ValueError):
+            pass
+        if self.proc.poll() is not None:
+            self.took(self.proc.returncode, self.proc.stdout.read())
+            self.proc = None
+
+    def took(self, code, answer):
+        self.live_colours = None
+        shutil.rmtree(os.path.dirname(self.live), ignore_errors=True)
+        try:
+            a = json.loads(answer) if code == 0 else None
+        except ValueError:
+            a = None
+        if not a:
+            self.note = "colours kept"
+            return
+        for g in self.cfg["groups"]:
+            k = g["key"]
+            g.update(hue=a["assign"].get(k, g["hue"]), step=a["step"].get(k, g["step"]),
+                     items=a["item_steps"].get(k, g["items"]))
+        self.changed()
+
+    def draw(self):
+        w, h = self.t.size()
+        c = self.live_colours or colours(self.cfg)
+        pal = roles(c)
+        foam = "\x1b[0;38;2;%d;%d;%dm" % tuple(int(pal["foam"][i:i + 2], 16) for i in (1, 3, 5))
+        mw = clamp(w - 40, 10, 30)
+        rows = {"colours": (swatches(c), "enter  pick in hue-pick"),
+                "pace": (meter(self.cfg["pace"], *PACE, mw, foam) + "  %.1f s a frame" % self.cfg["pace"], "← →"),
+                "tide": (meter(self.cfg["tide"], *TIDE, mw, foam) + "  %d%%" % self.cfg["tide"], "← →")}
+        out = ["\x1b[H\x1b[0;1m siesta-config\x1b[0m\x1b[K",
+               "\x1b[1;%dH\x1b[0;2m%s\x1b[0m" % (max(1, w - len(self.note)), self.note), "\x1b[2;1H\x1b[K"]
+        for i, name in enumerate(self.ROWS):
+            here = i == self.focus
+            body, keys = rows[name]
+            out.append("\x1b[%d;1H\x1b[0;%sm %s %-8s\x1b[0m %s   \x1b[0;2m%s\x1b[0m\x1b[K"
+                       % (3 + i, "1" if here else "2", "▸" if here else " ", name, body, keys if here else ""))
+        warn = "  ⌫ again resets colours, pace and tide · any other key keeps them" if self.armed else ""
+        out.append("\x1b[6;1H\x1b[0;1;31m%s\x1b[0m\x1b[K" % warn)
+        ph = max(0, h - 9)
+        out.append(paint(scene(max(10, w - 4), ph, self.f, self.tick, self.cfg["tide"]), pal, 2, 7))
+        out.append("\x1b[%d;1H\x1b[0;2m ↑ ↓ move · ⌫ ⌫ reset · esc close · changes save as you go\x1b[0m\x1b[K" % h)
+        self.t.write("".join(out))
+
+    def run(self):
+        last, next_frame = None, 0
+        while True:
+            self.poll()
+            if (size := self.t.size()) != last:
+                self.t.write("\x1b[0m\x1b[2J")
+                last = size
+            if time.time() >= next_frame:
+                self.f, self.tick = (self.f + 1) % FRAMES, self.tick + 1
+                next_frame = time.time() + self.cfg["pace"]
+            self.draw()
+            for k in self.t.keys(min(0.15, next_frame - time.time())):
+                if k in ("\x7f", "\x08"):
+                    if self.armed:
+                        self.cfg = defaults()
+                        self.changed()
+                    self.armed = not self.armed
+                    continue
+                self.armed = False
+                if k in ("esc", "q", "\x03"):
+                    if self.proc:
+                        self.proc.terminate()
+                    return 0
+                if k in ("up", "k"):
+                    self.focus = (self.focus - 1) % len(self.ROWS)
+                elif k in ("down", "j", "\t"):
+                    self.focus = (self.focus + 1) % len(self.ROWS)
+                elif k in ("left", "h", "-"):
+                    self.nudge(-1)
+                elif k in ("right", "l", "+", "="):
+                    self.nudge(1)
+                elif k in ("\r", "\n", " ") and self.ROWS[self.focus] == "colours" and not self.proc:
+                    self.pick()
+
+
+def configure():
+    with Term() as t:
+        return Config(t).run()
+
+
+# --- main --------------------------------------------------------------------
+
+def die(msg):
+    sys.stderr.write(msg + "\n")
+    sys.exit(2)
+
+
+def main(argv):
+    if os.path.basename(sys.argv[0]) == "siesta-config" or argv[:1] == ["config"]:
+        return configure()
+    pace = tide = frame = size = None
+    it = iter(argv)
+    try:
+        for a in it:
+            if a in ("-h", "--help"):
+                print(__doc__.strip())
+                return 0
+            elif a in ("-p", "--pace"):
+                pace = round(clamp(float(next(it)), *PACE), 1)
+            elif a in ("-t", "--tide"):
+                tide = int(clamp(float(next(it)), *TIDE))
+            elif a == "--print":
+                frame = int(next(it)) % FRAMES
+            elif a == "--size":
+                size = tuple(int(v) for v in next(it).lower().split("x"))
+            else:
+                die("siesta: unknown option %s · try --help" % a)
+    except (StopIteration, ValueError):
+        die("siesta: %s needs a value · try --help" % a)
+    if frame is not None:
+        cfg = load()
+        w, h = size or shutil.get_terminal_size((80, 24))
+        sys.stdout.write(paint(scene(w, h, frame, frame, tide or cfg["tide"]), roles(colours(cfg)), home=False))
+        return 0
+    try:
+        return watch(pace, tide)
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

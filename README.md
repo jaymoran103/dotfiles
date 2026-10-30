@@ -17,6 +17,7 @@ Plus cool stuff I built.
 | `bin/icons-batch` | `~/.local/bin/icons-batch` | One DiceBear blob PNG per seed, into `icons-<timestamp>/` |
 | `bin/color-pick` | `~/.local/bin/color-pick` | Colour picker any script or TUI can call — see below |
 | `bin/hue-pick` | `~/.local/bin/hue-pick` | Pick hue families for categories, raw or as a TUI; hues in `config/hue-pick/hues.json` · see `docs/pickers.md` |
+| `bin/siesta`, `bin/siesta-config` | `~/.local/bin/` | Waves on a beach in ASCII, a slow frame at a time; colours from `hue-pick` — see below |
 | `config/starship.toml` | `~/.config/starship.toml` | Prompt |
 | `git/gitconfig` | `~/.gitconfig` | Identity + `include` of untracked `~/.gitconfig.local` |
 
@@ -94,3 +95,16 @@ Every change repaints the window as you make it. `s` saves into
 `config/ghostty/themes/`, keeping any lines the editor does not manage,
 `S` saves as a new name and `a` saves and applies through `ghostty-theme`.
 Leaving puts the config's theme back. Needs only `python3`.
+
+## siesta
+
+```sh
+siesta                 # waves on a beach; space pauses, c opens the config, q leaves
+siesta -p 1.2 -t 90    # slower frames, waves run further up the sand
+siesta-config          # colours, pace and tide, with a live preview
+```
+
+`siesta-config` saves each change to `~/.config/siesta/config.json`, and a
+running `siesta` picks it up. Enter on `colours` opens `hue-pick --assign`
+with five groups: sky, sun, sea, foam and sand. In Ghostty it opens in a
+split and the preview recolours as you pick. `⌫` twice resets everything.
