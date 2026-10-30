@@ -10,6 +10,8 @@
       --tab           pick in a new Ghostty tab, and this process waits
       --split         the same, in a split to the right
       --nested        the caller already holds the alternate screen
+      --colours MODE  full or 256. The default asks the terminal: full when
+                      COLORTERM is truecolor or 24bit, else 256
 
 Enter prints the colour and exits 0. Esc or q prints nothing and exits 1.
 A usage error exits 2.
@@ -22,6 +24,10 @@ H S L and R G B sliders, and a row of swatches made of --palette and your
 recent picks. Arrows move and pick at once. # types a hex value. A paste
 of a hex value takes it from anywhere. c copies the hex, r goes back to
 the colour you started with.
+
+In 256 mode each colour is drawn as its nearest xterm-256 colour, so shades
+are close, not exact. The hex you pick is still exact, and the top swatch
+shows the colour it is drawn as.
 """
 
 import colorsys
@@ -64,17 +70,77 @@ def hsl_hex(h, s, l):
     return hexof(round(r * 255), round(g * 255), round(b * 255))
 
 
+FULL = True                         # set in main: can this terminal draw 24-bit colour
+
+
+def full_colour():
+    """True when the terminal says it draws 24-bit colour."""
+    return os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit")
+
+
+CUBE = (0, 95, 135, 175, 215, 255)        # the xterm-256 colour cube levels
+
+
+def oklab(h):
+    """h in OKLab, the space where equal steps look equal."""
+    def lin(v):
+        v /= 255
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(v) for v in rgb(h))
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+
+SNAPPED = {}
+LAB256 = []                         # each xterm colour from 16 up in OKLab, filled on first use
+
+
+def xterm(h):
+    """The xterm-256 index nearest h, by eye. A colour never snaps to a grey,
+    so a dark navy stays blue rather than turning charcoal."""
+    if h not in SNAPPED:
+        L, a, b = oklab(h)
+        grey = (a * a + b * b) ** 0.5 < 0.02
+        if not LAB256:
+            LAB256.extend(oklab(xterm_hex(n)) for n in range(16, 256))
+        pool = range(240 if grey else 216)
+        SNAPPED[h] = 16 + min(pool, key=lambda i: (LAB256[i][0] - L) ** 2 +
+                              (LAB256[i][1] - a) ** 2 + (LAB256[i][2] - b) ** 2)
+    return SNAPPED[h]
+
+
+def xterm_hex(n):
+    """The colour xterm-256 index n draws, for n from 16 up."""
+    if n >= 232:
+        return hexof(*(8 + 10 * (n - 232),) * 3)
+    n -= 16
+    return hexof(CUBE[n // 36], CUBE[n // 6 % 6], CUBE[n % 6])
+
+
 def FG(h):
-    return "\x1b[38;2;%d;%d;%dm" % rgb(h)
+    if FULL:
+        return "\x1b[38;2;%d;%d;%dm" % rgb(h)
+    return "\x1b[38;5;%dm" % xterm(h)
 
 
 def BG(h):
-    return "\x1b[48;2;%d;%d;%dm" % rgb(h)
+    if FULL:
+        return "\x1b[48;2;%d;%d;%dm" % rgb(h)
+    return "\x1b[48;5;%dm" % xterm(h)
+
+
+def shown(h):
+    """The colour the terminal really draws for h."""
+    return h if FULL else xterm_hex(xterm(h))
 
 
 def ink(h):
-    """Black or white, whichever reads on h."""
-    r, g, b = rgb(h)
+    """Black or white, whichever reads on h as drawn."""
+    r, g, b = rgb(shown(h))
     return "#000000" if 0.299 * r + 0.587 * g + 0.114 * b > 140 else "#ffffff"
 
 
@@ -492,9 +558,11 @@ class App:
     def draw_swatch(self, c, y, x, w):
         was, now = self.start, self.col.hex
         third = w // 3
+        # In 256 mode the second row says what the terminal really draws.
+        under = "" if shown(now) == now else " drawn as " + shown(now)
         for r in (0, 1):
             c.put(y + r, x, (" was " + was if r == 0 else "").ljust(third), BG(was) + FG(ink(was)))
-            c.put(y + r, x + third, (" now " + now if r == 0 else "").ljust(w - third),
+            c.put(y + r, x + third, (" now " + now if r == 0 else under).ljust(w - third),
                   BG(now) + FG(ink(now)))
         return y + 2
 
@@ -654,11 +722,12 @@ def die(msg):
 
 def parse(argv):
     opts = {"title": None, "palette": [], "format": "hex", "out": None,
-            "where": None, "nested": False, "answer": None, "start": None}
+            "where": None, "nested": False, "answer": None, "start": None,
+            "colours": "auto"}
     rest, i = [], 0
     takes = {"-t": "title", "--title": "title", "-p": "palette", "--palette": "palette",
              "-f": "format", "--format": "format", "-o": "out", "--out": "out",
-             "--answer": "answer"}
+             "--answer": "answer", "--colours": "colours", "--colors": "colours"}
     while i < len(argv):
         a = argv[i]
         if a in ("-h", "--help"):
@@ -697,11 +766,15 @@ def parse(argv):
         i += 1
     if opts["format"] not in ("hex", "bare", "rgb"):
         die("color-pick: --format is hex, bare or rgb")
+    if opts["colours"] not in ("auto", "full", "256"):
+        die("color-pick: --colours is full or 256")
     return opts, rest
 
 
 def main():
+    global FULL
     opts, rest = parse(sys.argv[1:])
+    FULL = opts["colours"] == "full" or (opts["colours"] == "auto" and full_colour())
     if opts["where"]:
         # The other tab owns the screen, so --nested means nothing there.
         result = elsewhere(opts["where"], [a for a in rest if a != "--nested"])
