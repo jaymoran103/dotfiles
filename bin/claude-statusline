@@ -1,10 +1,22 @@
 #!/bin/sh
-# Claude Code status line: pwd, git branch, context used, 5h/7d usage left.
+# Claude Code status line: context used, 7d/5h usage left, session spend, pwd, git branch, worktree, output style, then prompt cache.
 in=$(cat)
+# Export 5h/7d headroom to otel.espocorp.com. The exporter detaches its POST and prints a segment we discard.
+printf '%s' "$in" | python3 "$HOME/.claude/claude-code-headroom-statusline.py" >/dev/null 2>&1
 dir=$(printf '%s' "$in" | jq -r '.workspace.current_dir // .cwd')
 short=$(printf '%s' "$dir" | sed "s|^$HOME|~|")
 branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 dirty=$(git -C "$dir" status --porcelain 2>/dev/null | head -1)
-printf '%s' "$in" | jq -r --arg d "$short" --arg b "$branch" --arg x "${dirty:+*}" '
+# A linked worktree has its own git dir, separate from the shared common dir.
+wt=$(printf '%s' "$in" | jq -r '.workspace.git_worktree // .worktree.name // empty')
+if [ -z "$wt" ] && [ "$(git -C "$dir" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  wt=$(basename "$(git -C "$dir" rev-parse --show-toplevel)")
+fi
+printf '%s' "$in" | jq -r --arg d "$short" --arg b "$branch" --arg x "${dirty:+*}" --arg w "$wt" '
   def left(w): if w then "\(100 - w.used_percentage | floor)%" else "-" end;
-  "\($d)\(if $b != "" then " \($b)\($x)" else "" end) · ctx \(.context_window.used_percentage // 0 | floor)% · 5h \(left(.rate_limits.five_hour)) · 7d \(left(.rate_limits.seven_day))"'
+  # Prompt cache is its own unit, set apart from the main stats by a wider gap.
+  def cache(c):
+    if c == null then ""
+    elif c.warm then "    cache \((c.hit_ratio // 0) * 100 | floor)% hit | \(c.misses // 0)/\(c.requests // 0) miss | \((c.expires_at - now) / 60 | if . > 0 then floor else 0 end)m left"
+    else "    cache cold | \((c.recache_tokens_if_cold // 0) / 1000 | floor)k to rebuild" end;
+  "ctx \(.context_window.used_percentage // 0 | floor)% | 7d \(left(.rate_limits.seven_day)) | 5h \(left(.rate_limits.five_hour)) | $\(.cost.total_cost_usd // 0 | . * 100 | round / 100) | \($d)\(if $b != "" then " \($b)\($x)" else "" end)\(if $w != "" then " [wt:\($w)]" else "" end) | \(.output_style.name // "-")\(cache(.prompt_cache))"'
