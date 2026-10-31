@@ -1,6 +1,6 @@
 # The preset kit
 
-`lib/preset_kit.py` is the shared frame for a tool that keeps named presets for one thing and lets you pick one. A preset says which elements show, in what order, and the value of each setting. Every tool on the kit has the same command line, files and keys. `claude-statusline` is the first tool on it.
+`lib/preset_kit.py` is the shared frame for a tool that keeps named presets for one thing and lets you pick one. A preset says which elements show, in what order, and the value of each setting. Every tool on the kit has the same command line, files and keys. Two tools are built on it. `claude-statusline` picks which stats show, and `ghostty-config` sets Ghostty's look and feel.
 
 ## What a tool supplies
 
@@ -32,6 +32,36 @@ if __name__ == "__main__":
 
 The tool's runtime reads `tool.active_preset()`. It gets `{"show": [keys], "set": {key: value}}`, cleaned of keys the tool no longer has.
 
+## Elements
+
+| kind | holds | editor keys |
+| --- | --- | --- |
+| `show` | in or out, and a place in the order | `space` show or hide, `⇧↑↓` reorder |
+| `choice` | one of `choices`, a tuple or a callable | `←→` cycle; `enter` opens a filtered list past 7 options |
+| `number` | `lo` to `hi` in steps of `step` | `←→` step, `⇧←→` 10 steps, `enter` type |
+| `color` | a `#rrggbb` hex | `enter` opens `color-pick`, `#` types a hex |
+| `text` | free text | `enter` type |
+
+| option | effect |
+| --- | --- |
+| `group` | files the element under a folding heading |
+| `optional` | the setting can be unset with `x`, and the tool leaves it out |
+| `default` | the value when not optional, and where a number starts stepping |
+| `actions` | `{key: (label, fn)}`. `fn(tool, value)` runs with the terminal handed over, and returns a new value or `None` |
+
+## Hooks
+
+All optional. The kit calls them, and a tool overrides the ones it needs.
+
+| hook | called | used by `ghostty-config` to |
+| --- | --- | --- |
+| `value(key)` | beside each element | show what an unset setting falls back to |
+| `live(preset)` | on hover and on each change | repaint the window in the preset's colours |
+| `restore()` | when the picker closes | put the window's colours back |
+| `applied(name, preset)` | when a preset goes into use, or the one in use is edited | write the config fragment |
+
+`pickup` is what the footer says when a preset goes into use. `list_shows = False` drops the list of shown elements under the preview.
+
 ## What every tool gets
 
 | | |
@@ -57,7 +87,7 @@ A preset of yours with a built-in's name hides it, and the list calls it `change
 
 ## Keys
 
-Two screens. The preset list draws the hovered preset on the right, with what it shows. The editor lists every element, shown ones first in order. Edits save as you make them, so `esc` only goes back. Undo all and delete are armed: `⌫` once says what goes, and `⌫` again does it.
+Three screens. The preset list draws the hovered preset on the right. The editor lists every element, shown ones first in order, under folding group headings when the tool has groups. A long choice opens a list you filter by typing, and the preview follows the hovered option. Edits save as you make them, so `esc` only goes back. Undo all and delete are armed: `⌫` once says what goes, and `⌫` again does it.
 
 | list | | editor | |
 | --- | --- | --- | --- |
@@ -67,6 +97,8 @@ Two screens. The preset list draws the hovered preset on the right, with what it
 | `⌫ ⌫` | delete yours | `z` `y` | undo, redo |
 | `q` `esc` | quit | `⌫ ⌫` | undo all |
 | `?` | keys | `esc` `←` | back |
+| | | `x` | unset |
+| | | `-` `+` | fold all, open all |
 
 ## The worked example: claude-statusline
 
@@ -74,6 +106,16 @@ Claude Code pipes session JSON into `bin/claude-statusline`, and it prints one l
 
 Its elements are segment functions in a dict, `SEGMENTS`. A new stat is one function and one `Element` line. `ATTACH` joins a segment to the one before with a space, and `APART` sets one off with a wide gap.
 
+## The worked example: ghostty-config
+
+`bin/ghostty-config` is one tool for all of Ghostty. A preset is a config fragment. About 30 settings sit in six groups: Theme, Font, Window, Cursor, Mouse and clipboard, and Keys. Each element's key is the Ghostty option's own name, so the fragment is one `key = value` line per set element. Every setting is optional, and an unset one keeps your config's value.
+
+`applied()` writes the fragment to `~/.local/state/ghostty-config/active.conf`. On first use it adds one line to your Ghostty config, `config-file = ?<that path>`. New windows take a pick, and `⌘⇧,` reloads open ones.
+
+The theme is a `choice` whose options come from a callable: your themes, then Ghostty's. Its `c` action opens `ghostty-theme-edit` on the theme, so the colour tree is reused, not rebuilt. `live()` repaints the window with OSC colour codes as you move through themes and colours.
+
+`GHOSTTY_CONFIG`, `GHOSTTY_THEMES_DIR`, `GHOSTTY_CONFIG_PRESETS_DIR` and `XDG_STATE_HOME` point it at copies, for tests.
+
 ## Next on the kit
 
-`starship-preset` and `ghostty-theme-edit` predate the kit. Moving them on means one `Tool` subclass each, with Starship modules or Ghostty colours as the elements. A `color` element kind that opens `color-pick --nested` would serve both.
+`starship-preset` predates the kit. Moving it on means one `Tool` subclass, with Starship modules as `show` elements and their styles as `color` elements.

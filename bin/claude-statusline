@@ -236,8 +236,9 @@ class StatusLine(Tool):
         if when is None:
             src = "made-up numbers · no session has run yet"
         else:
-            ago = int(time.time() - when) // 60
-            src = "numbers from your last session · " + (f"{ago}m ago" if ago else "just now")
+            m = int(time.time() - when) // 60
+            ago = "just now" if not m else f"{m}m ago" if m < 60 else f"{m // 60}h ago" if m < 1440 else f"{m // 1440}d ago"
+            src = "numbers from your last session · " + ago
         return rows + ["", DIM + src]
 
 

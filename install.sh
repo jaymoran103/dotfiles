@@ -68,12 +68,14 @@ link_configs() {
   backup_and_link "$DOTFILES/bin/siesta-config"     "$HOME/.local/bin/siesta-config"
   backup_and_link "$DOTFILES/bin/forgej"            "$HOME/.local/bin/forgej"
   backup_and_link "$DOTFILES/bin/starship-preset"   "$HOME/.local/bin/starship-preset"
+  backup_and_link "$DOTFILES/bin/ghostty-config"    "$HOME/.local/bin/ghostty-config"
   # Claude's allow rule runs the launcher from this path.
   mkdir -p "$HOME/forge-data/bin"
   backup_and_link "$DOTFILES/bin/forgej"            "$HOME/forge-data/bin/forgej"
   backup_and_link "$DOTFILES/config/starship.toml"  "$HOME/.config/starship.toml"
   backup_and_link "$DOTFILES/config/starship/presets" "$HOME/.config/starship/presets"
   backup_and_link "$DOTFILES/config/claude-statusline/presets" "$HOME/.config/claude-statusline/presets"
+  backup_and_link "$DOTFILES/config/ghostty-config/presets" "$HOME/.config/ghostty-config/presets"
   backup_and_link "$DOTFILES/zsh/starship-preset.zsh" "$HOME/.config/starship/starship-preset.zsh"
   backup_and_link "$DOTFILES/git/gitconfig"         "$HOME/.gitconfig"
   if [[ ! -f "$HOME/.gitconfig.local" ]]; then
